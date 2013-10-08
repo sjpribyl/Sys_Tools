@@ -27,10 +27,10 @@ else
     EXPR=/usr/bin/expr
     HOSTNAME=`uname -n`
     HN=${HOSTNAME%%.*}
-    RUN_SH=/bin/ksh
+    RUN_SH=/bin/bash
 fi
 
-while (( [ $# -ge 1 ] )); do
+while ( [ $# -ge 1 ] ); do
     if [ -z "${script}" -a "${1}" = "-h" ]; then
         /bin/echo "${0} [-hq] [-u <email address>] <description> <program>"
         /bin/echo "Email the results of this program"
