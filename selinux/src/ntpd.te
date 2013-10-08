@@ -1,0 +1,14 @@
+module ntpd 1.0.0;
+
+require {
+      class sock_file write;
+      class unix_stream_socket connectto;
+      type ntpd_t;
+      type var_run_t;
+      type initrc_t;
+}
+
+#============= restorecond_t ==============
+allow ntpd_t var_run_t:sock_file write;
+allow ntpd_t initrc_t:unix_stream_socket connectto;
+

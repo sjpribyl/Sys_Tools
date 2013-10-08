@@ -1,0 +1,45 @@
+#!/usr/bin/perl
+#
+use strict;
+use warnings;
+
+$|=1; 
+
+
+my $error=0;
+my $changed=0;
+my $INV="/root/data/lxinv/.reports/host_list.txt";
+
+open(INPUT,"<",'/var/www/Inventory/.reports/base_inv.csv') or die "Can't open base_inv.pl";
+open(OUTPUT,">",$INV) or die "Can't open $INV" ;
+while(<INPUT>) {
+	chomp; #Cut off linefeed
+	chop; #Cut off ;
+	my $line=$_;
+	my @data= split(',',$line);
+	if ($#data > 5) {
+		next if ($data[0] eq 'Host'); #SKIP HEADER
+		next if ($data[0] =~ '^uschi10'); #SKIP LAB
+		next if ($data[2] =~ 'Workstation'); # Workstations
+		next if ($data[2] =~ 'Compaq'); #Workstations 
+		print OUTPUT "$data[0]\n";
+	}
+}
+close OUTPUT;
+close INPUT;
+
+print "Service is some kind of state:\n";
+open (INPUT,"WCOLL=$INV /usr/bin/pdsh -f 100 'ps auwx|grep /etc/rc6.d/K|grep -v grep' 2>&1 |") or die "Can't open pdsh command";
+while(<INPUT>) {
+		next if ($_ =~ 'pdsh'); 
+		next if ($_ =~ 'exit code 1'); 
+		next if ($_ =~ 'exit code 255'); 
+		next if ($_ =~ 'again'); 
+		next if ($_ =~ 'Could not resolve'); 
+		next if ($_ =~ 'Perm'); 
+        if ( $_ =~ /(exit code)|(not known)|(timed out)|(rc6)/ ) {
+			print $_;
+		}
+}
+
+exit $error;

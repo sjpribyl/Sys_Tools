@@ -1,0 +1,26 @@
+module mount 1.0.0;
+require {
+	type mount_t;
+	class tcp_socket node_bind;
+	class tcp_socket name_connect;
+	class udp_socket node_bind;
+	class udp_socket name_bind;
+	class capability net_bind_service;
+	class dir mounton;
+	type node_t;
+	type port_t;
+	type initrc_tmp_t;
+	type hi_reserved_port_t;
+	type dhcpd_port_t;
+} 
+
+#============= mount_t ==============
+allow mount_t node_t:tcp_socket node_bind;
+allow mount_t node_t:udp_socket node_bind;
+allow mount_t port_t:tcp_socket name_connect;
+allow mount_t dhcpd_port_t:udp_socket name_bind;
+allow mount_t initrc_tmp_t:dir mounton;
+allow mount_t hi_reserved_port_t:udp_socket name_bind;
+allow mount_t self:capability net_bind_service;
+
+

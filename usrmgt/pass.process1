@@ -1,0 +1,49 @@
+#!/bin/ksh 
+### you must run ftp befreo to get all /etc/passwd
+### this will combine the information in the files
+##################################################
+fileprefix=/export/home/infosec
+#### open temp files
+cat /dev/null > $fileprefix/Temp/read.pass2.all
+cat /dev/null > $fileprefix/Temp/read.pass2.id 
+cat /dev/null > $fileprefix/Temp/read.group2.all
+cat /dev/null > $fileprefix/Temp/read.group2.id 
+cat /dev/null > $fileprefix/Temp/read.pass2.idactive
+cat /dev/null > $fileprefix/Temp/read.pass2.allactive
+cat /dev/null > $fileprefix/Temp/read.pass2.idactivesorted
+
+####################################################
+###   start process for password files
+ls $fileprefix/Passwd > $fileprefix/boxinput   ## update list of boxes with input
+while read  box
+do
+	/usr/xpg4/bin/awk -v box="$box" -v fileprefix=$fileprefix -F: '{ 
+		OFS = " ";
+		print $1,$3,$4,box,$5  >> (fileprefix "/Temp/read.pass2.all"); 
+		print $1  >> (fileprefix "/Temp/read.pass2.id"); 
+		where = match(tolower($5), /disable/)
+		if (!where) {
+			print $1,$3,$4,box,$5 >> (fileprefix "/Temp/read.pass2.allactive");
+			print $1 >> (fileprefix "/Temp/read.pass2.idactive");
+		}
+	}' $fileprefix/Passwd/$box 
+done < $fileprefix/boxinput
+
+#### create files for all ids
+sort -o $fileprefix/allids.sorted $fileprefix/Temp/read.pass2.all 
+sort -o $fileprefix/Temp/read.pass2.idsorted  $fileprefix/Temp/read.pass2.id
+uniq -c $fileprefix/Temp/read.pass2.idsorted > $fileprefix/allids.count
+
+#### create files of active ids
+sort -o $fileprefix/activeids.sorted $fileprefix/Temp/read.pass2.allactive 
+sort -o $fileprefix/Temp/read.pass2.idactivesorted  $fileprefix/Temp/read.pass2.idactive
+uniq -c $fileprefix/Temp/read.pass2.idactivesorted > $fileprefix/activeids.count
+
+##########################################
+### start process for groups
+ls $fileprefix/Group > $fileprefix/boxinput2   ## update list of boxes with input
+while read  box
+do
+	/usr/xpg4/bin/awk -v box=$box -v fileprefix=$fileprefix -F : '{ OFS = " "; print $1,$3,box  >> (fileprefix "/Temp/read.group2.all") ;}'  $fileprefix/Group/$box 
+done < $fileprefix/boxinput2
+sort -o $fileprefix/allgroups.sorted $fileprefix/Temp/read.group2.all 

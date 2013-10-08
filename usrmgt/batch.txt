@@ -1,0 +1,2 @@
+user-l:<UNAME>:ALL|<hostlist>
+group-ru:<GROUP>:<UNAME>:ALL|<hostlist>

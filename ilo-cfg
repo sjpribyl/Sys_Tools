@@ -1,0 +1,47 @@
+#!/bin/bash
+
+PWD="trans()C"
+
+ILO_XML=`/bin/mktemp -t ilo_cfg.XXXXXX`
+/sbin/hponcfg -a -w ${ILO_XML} >/dev/null 2>&1
+
+#
+#If ilo2 delete ssh keys, before adding them again, ilo2 does not check for duplicates and you can detect that it is already there.
+#
+grep iLO2 ${ILO_XML} >/dev/null 2>&1
+if [ $? -eq 0 ]; then 
+DEL_XML=`/bin/mktemp -t ilo_del.XXXXXX`
+cat > ${DEL_XML} << EOF_DEL_KEY
+<RIBCL VERSION="2.0">
+   <LOGIN USER_LOGIN="admin" PASSWORD="admin123">
+      <USER_INFO MODE="write">
+         <MOD_USER USER_LOGIN="iloadmin">
+            <DEL_USERS_SSH_KEY/> 
+         </MOD_USER>
+      </USER_INFO>
+   </LOGIN>
+</RIBCL>
+EOF_DEL_KEY
+/sbin/hponcfg -f ${DEL_XML}
+rm -f ${DEL_XML}
+fi
+rm -f ${ILO_XML}
+
+USER_XML=`/bin/mktemp -t ilo_user.XXXXXX`
+/sbin/hponcfg -w ${USER_XML} >/dev/null 2>&1
+grep  iloadmin ${USER_XML} >/dev/null 2>&1
+if [ $? -ne 0 ]; then 
+ /sbin/hponcfg -f /etc/sysconfig/ilo_usr.xml -s hostname=`hostname -s`,domain=`hostname -d`,user_password="$PWD"
+fi
+
+#
+#If ilo requires 2 users before ssh keys work.
+#
+grep linuxadmin ${USER_XML} >/dev/null 2>&1
+if [ $? -ne 0 ]; then 
+ /sbin/hponcfg -f /etc/sysconfig/ilo-usr-admin.xml -s hostname=`hostname -s`,domain=`hostname -d`,user_password="$PWD" 
+fi
+rm -f ${USER_XML}
+
+/sbin/hponcfg -f /etc/sysconfig/ilo.xml -s hostname=`hostname -s`,domain=`hostname -d`,user_password="$PWD"
+exit $?

@@ -1,0 +1,47 @@
+#!/usr/bin/perl -w
+#print "__LINE__, YOU ARE HERE $datapoint[1]\n";
+
+use POSIX;
+select STDERR; $|=1;
+select STDOUT; $|=1;
+my %data=();
+my %total=();
+my %stdtotal=();
+my %cnt=();
+#print "Host/OS/TAG, Size, Average,StDev\n";
+open INPUT,"cat $ARGV[0] |" or die "Can't open file $ARGV[0]: $!";
+while (<INPUT>)  {
+	next unless /^TNG/;
+	chomp;
+	@datapoint=split /,/;
+	if( ! $cnt{$datapoint[1]}) {
+		$cnt{$datapoint[1]}=0;
+	}
+	if( ! $data{$datapoint[1]} ) { 
+		$data{$datapoint[1]}=[$datapoint[6]];
+	} else {
+		$data{$datapoint[1]}[$cnt{$datapoint[1]}]=$datapoint[6];
+	}
+	if ( ! $total{$datapoint[1]} ) { 
+		$total{$datapoint[1]}=$datapoint[6];
+	} else {
+		$total{$datapoint[1]}=$total{$datapoint[1]}+$datapoint[6];
+	}
+	$cnt{$datapoint[1]}++;
+}
+
+@name=split(/\//,$ARGV[0]);
+print "$name[4]-$name[5]-$name[6]\n";
+printf "\tLEG ,COUNT,   AVERAGE,     StDev\n";
+foreach $k (sort keys %cnt ) {
+	$ave=$total{$k}/$cnt{$k};
+	$stdtotal=0;
+	for($i = 0; $i < $cnt{$k}; $i++) {
+		$stdtotal=$stdtotal+(($data{$k}[$i]-$ave)**2);
+		#print (($data[$i]-$ave)**2)." $stdtotal \n";
+	}
+	$std=sqrt($stdtotal/($cnt{$k}-1));
+	printf "\t%s,%5u,%10g,%10g\n",$k, $cnt{$k}, $ave,$std;
+
+}
+

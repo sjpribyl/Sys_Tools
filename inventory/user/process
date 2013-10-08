@@ -1,0 +1,55 @@
+#!/bin/bash 
+
+STATUS=0
+BINDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+BASEDIR=/var/www/Inventory/.reports/users
+/bin/rm -rf ${BASEDIR}/*
+if [ $? -ne 0 ]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi
+/bin/mkdir -p ${BASEDIR}/data
+if [ $? -ne 0 ]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi
+
+/usr/bin/ldapsearch -C -x -h dcauth1.chicagotrading.com -b dc=chicagotrading,dc=com -D "CN=apache,CN=Users,DC=chicagotrading,DC=com" -w ehcapa  '(&(objectClass=user)(uidNumber=*))' sAMAccountName uidNumber | egrep '(^uid|^sAMA)' | sed 'N;s/\n/ /' | sed "s/sAMAccountName: //" | sed "s/uidNumber: //" > ${BASEDIR}/data/users.chi
+#for res in "${PIPESTATUS[@]}"; do
+#	if [[ ( $res > 0 ) ]]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi;
+#done
+
+#/usr/bin/ldapsearch -C -x -h dcauth1.nyc.chicagotrading.com -b dc=nyc,dc=chicagotrading,dc=com -D "CN=apache,CN=Users,DC=chicagotrading,DC=com" -w ehcapa  '(&(objectClass=user)(uidNumber=*))' sAMAccountName uidNumber | egrep '(^uid|^sAMA)' | sed 'N;s/\n/ /' | sed "s/sAMAccountName: //" | sed "s/uidNumber: //" > ${BASEDIR}/data/users.nyc
+#for res in "${PIPESTATUS[@]}"; do
+#	if [[ ( $res > 0 ) ]]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi;
+#done
+
+#/usr/bin/ldapsearch -C -x -h dcauth1.lon.chicagotrading.com -b dc=lon,dc=chicagotrading,dc=com -D "CN=apache,CN=Users,DC=chicagotrading,DC=com" -w ehcapa  '(&(objectClass=user)(uidNumber=*))' sAMAccountName uidNumber | egrep '(^uid|^sAMA)' | sed 'N;s/\n/ /' | sed "s/sAMAccountName: //" | sed "s/uidNumber: //" > ${BASEDIR}/data/users.lon
+#for res in "${PIPESTATUS[@]}"; do
+#	if [[ ( $res > 0 ) ]]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi;
+#done
+
+cat `find /var/www/Inventory -maxdepth 2 -type f -name "passwd"` | cut -f 3,1 -d : | sort -u | sort -n  | sed "s/:/ /" > ${BASEDIR}/data/users.files
+for res in "${PIPESTATUS[@]}"; do
+	if [[ ( $res > 0 ) ]]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi;
+done
+
+/usr/bin/ldapsearch -C -x -h dcauth1.chicagotrading.com -b dc=chicagotrading,dc=com -D "CN=apache,CN=Users,DC=chicagotrading,DC=com" -w ehcapa  '(&(objectClass=group)(gidNumber=*))' sAMAccountName gidNumber | egrep '(^gid|^sAMA)' | sed 'N;s/\n/ /' | sed "s/sAMAccountName: //" | sed "s/gidNumber: //" > ${BASEDIR}/data/groups.chi
+#for res in "${PIPESTATUS[@]}"; do
+#	if [[ ( $res > 0 ) ]]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi;
+#done
+
+#/usr/bin/ldapsearch -C -x -h dcauth1.nyc.chicagotrading.com -b dc=nyc,dc=chicagotrading,dc=com -D "CN=apache,CN=Users,DC=chicagotrading,DC=com" -w ehcapa  '(&(objectClass=group)(gidNumber=*))' sAMAccountName gidNumber | egrep '(^gid|^sAMA)' | sed 'N;s/\n/ /' | sed "s/sAMAccountName: //" | sed "s/gidNumber: //" > ${BASEDIR}/data/groups.nyc
+#for res in "${PIPESTATUS[@]}"; do
+#	if [[ ( $res > 0 ) ]]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi;
+#done
+
+#/usr/bin/ldapsearch -C -x -h dcauth1.lon.chicagotrading.com -b dc=lon,dc=chicagotrading,dc=com -D "CN=apache,CN=Users,DC=chicagotrading,DC=com" -w ehcapa  '(&(objectClass=group)(gidNumber=*))' sAMAccountName gidNumber | egrep '(^gid|^sAMA)' | sed 'N;s/\n/ /' | sed "s/sAMAccountName: //" | sed "s/gidNumber: //" > ${BASEDIR}/data/groups.lon
+#for res in "${PIPESTATUS[@]}"; do
+#	if [[ ( $res > 0 ) ]]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi;
+#done
+
+cat `find /var/www/Inventory -maxdepth 2 -type f -name "group"` | cut -f 3,1 -d : | sort -u | sort -n | sed "s/:/ /" > ${BASEDIR}/data/groups.files
+for res in "${PIPESTATUS[@]}"; do
+	if [[ ( $res > 0 ) ]]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi;
+done
+
+${BINDIR}/users.py > ${BASEDIR}/uid_report.txt
+if [ $? -ne 0 ]; then STATUS=1; /bin/echo "FAILURE!! #${LINENO}!!"; fi
+cat ${BASEDIR}/uid_report.txt
+
+exit ${STATUS}

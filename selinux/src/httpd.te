@@ -1,0 +1,34 @@
+module httpd 1.0.0;
+require {
+      class dir search;
+      class dir read;
+      class file read;
+      class file open;
+      class file write;
+      class file getattr;
+	  class file execute;
+      class capability ipc_lock;
+	  class tcp_socket name_connect;
+      type httpd_t;
+      type sysctl_crypto_t;
+      type mysqld_port_t;
+      type pop_port_t;
+      type smtp_port_t;
+      type sendmail_exec_t;
+      type var_lib_t;
+      type var_t;
+} 
+
+
+#============= httpd_t ==============
+allow httpd_t self:capability ipc_lock;
+allow httpd_t sysctl_crypto_t:dir search;
+allow httpd_t sysctl_crypto_t:file read;
+allow httpd_t mysqld_port_t:tcp_socket name_connect;
+allow httpd_t var_lib_t:file write;
+allow httpd_t pop_port_t:tcp_socket name_connect;
+allow httpd_t sendmail_exec_t:file execute;
+allow httpd_t smtp_port_t:tcp_socket name_connect;
+allow httpd_t var_t:dir read;
+allow httpd_t var_t:file { read getattr open };
+

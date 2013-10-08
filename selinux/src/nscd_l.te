@@ -1,0 +1,15 @@
+module nscd_l 1.0.0;
+require {
+	type nscd_t;
+	class capability ipc_lock;
+	class dir search;
+	class file read;
+	type sysctl_crypto_t;
+
+} 
+
+#============= nscd_t ==============
+allow nscd_t self:capability ipc_lock;
+allow nscd_t sysctl_crypto_t:dir search;
+allow nscd_t sysctl_crypto_t:file read;
+

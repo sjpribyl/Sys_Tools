@@ -1,0 +1,21 @@
+module ssh_l 1.0.0;
+
+require {
+      class dir search;
+      class file read;
+      class sock_file write;
+      class unix_stream_socket connectto;
+      type sshd_t;
+      type var_run_t;
+      type sysctl_crypto_t;
+      type unconfined_t;
+      type initrc_t;
+}
+
+#============= sshd_t ==============
+allow sshd_t sysctl_crypto_t:dir search;
+allow sshd_t sysctl_crypto_t:file read;
+allow sshd_t unconfined_t:unix_stream_socket connectto;
+allow sshd_t var_run_t:sock_file write;
+allow sshd_t initrc_t:unix_stream_socket connectto;
+

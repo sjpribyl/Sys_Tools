@@ -1,0 +1,101 @@
+#!/bin/bash 
+
+ARCHIVE=0
+OUTFILE="/dev/null"
+
+while (( "$#" )); do
+	if [ "${1}" = "-a" ]; then
+		ARCHIVE=1;
+	elif [ "${1}" = "-f" ]; then
+		shift
+		OUTFILE=$1
+		if [ "x${OUTFILE}" == "x-" ]; then
+			OUTFILE="/dev/null"
+		fi
+		if [ -z $OUTFILE ]; then
+			OUTFILE="/var/www/Inventory/.reports/missing_inv.txt"
+		fi
+	fi
+	shift
+done
+
+STATUS=0
+#Find host old the N number of days.
+for I in `find /var/www/Inventory -maxdepth 1 -ctime +1 | cut -f 5 -d '/'` 
+do
+#	/bin/echo -e "$I"  
+	if [[ $I != \.* ]]; then #SKIP .directories and files
+		#Ping the servers
+		ping -c1 -W1 $I 1>/dev/null 2>&1 
+		PING=$?
+		if [ $PING -eq 0 ]; then  #OH I can ping it, but there is no update
+			missing=( "${missing[@]}" $I )
+		elif [ $PING -eq 2 ]; then  # no DNS 
+			ndns=( "${ndns[@]}" $I )
+		else  # 1 dns but no ping or something very bad 
+			nf=( "${nf[@]}" $I )
+		fi
+	fi
+done
+
+ 
+/bin/echo -e "\nServers no longer reachable" 2>&1 | /usr/bin/tee $OUTFILE 2>&1
+if [ ${#nf[@]} -gt 0 ]; then 
+	/bin/echo -e "\n\tWill be archived after 4 days\n" 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+	 # use for loop read all nameservers
+	for (( i=0; i<${#nf[@]}; i++ ));
+	do
+		days=`expr \`date +%s\` - \`stat -c %Z /var/www/Inventory/${nf[$i]}\``
+		days=`expr $days / 86400`
+		/bin/echo -e "\t${nf[$i]} $days days\\c" 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+		if [ ${ARCHIVE} -eq 1 -a $days -gt 4 ]; then 
+			/bin/echo  " Archiving" 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+			#TODO Acutally archive the files
+			/bin/mkdir -p /var/www/Inventory/.archive
+			if [ -e /var/www/Inventory/.archive/${nf[$i]} ]; then
+				rm -rf /var/www/Inventory/.archive/${nf[$i]}
+				if [ $? -ne 0 ]; then STATUS=1; fi
+			fi
+			mv -uf /var/www/Inventory/${nf[$i]} /var/www/Inventory/.archive  
+			if [ $? -ne 0 ]; then STATUS=1; fi
+		else
+			/bin/echo  2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+		fi
+	done
+fi
+
+/bin/echo -e "\nServers no longer in DNS and will be archived" 2>&1 | /usr/bin/tee -a $OUTFILE 2>&1
+if [ ${#ndns[@]} -gt 0 ]; then 
+	for (( i=0; i<${#ndns[@]}; i++ ));
+	do
+		#TODO Acutally archive the files
+		days=`expr \`date +%s\` - \`stat -c %Z /var/www/Inventory/${ndns[$i]}\``
+		days=`expr $days / 86400`
+		if [ ${ARCHIVE} -eq 1 ]; then 
+			/bin/mkdir -p /var/www/Inventory/.archive
+			if [ -e /var/www/Inventory/.archive/$ndns[$i] ]; then
+				rm -rf /var/www/Inventory/.archive/$ndns[$i]
+				if [ $? -ne 0 ]; then STATUS=1; fi
+			fi
+			mv -uf /var/www/Inventory/${ndns[$i]} /var/www/Inventory/.archive  
+			if [ $? -ne 0 ]; then STATUS=1; fi
+		fi
+		/bin/echo -e "\t${ndns[$i]} $days days" 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+	done
+fi
+
+/bin/echo -e "\nServers not updated in the last two days,but reachable" 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+if [ ${#missing[@]} -gt 0 ]; then 
+	/bin/echo  2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+	for (( i=0; i<${#missing[@]}; i++ ));
+	do
+		days=`expr \`date +%s\` - \`stat -c %Z /var/www/Inventory/${missing[$i]}\``
+		days=`expr $days / 86400`
+		/bin/echo -e "\t${missing[$i]} $days days" 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+		STATUS=1
+	done
+	echo
+fi
+
+exit $STATUS;
+# vim: ts=4  sw=4 autoindent

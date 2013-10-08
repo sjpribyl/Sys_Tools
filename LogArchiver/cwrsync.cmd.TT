@@ -1,0 +1,148 @@
+@ECHO off
+REM *****************************************************************
+REM
+REM CWRSYNC.CMD - Batch file template to start your rsync command (s).
+REM
+REM By Tevfik K. (http://itefix.no)
+REM *****************************************************************
+
+REM Make environment variable changes local to this batch file
+SETLOCAL
+
+REM ** CUSTOMIZE ** Specify where to find rsync and related files (C:\CWRSYNC)
+SET CWRSYNCHOME=%PROGRAMFILES%\CWRSYNC
+
+REM Set CYGWIN variable to 'nontsec'. That makes sure that permissions
+REM on your windows machine are not updated as a side effect of cygwin
+REM operations.
+SET CYGWIN=nontsec
+
+REM Set HOME variable to your windows home directory. That makes sure 
+REM that ssh command creates known_hosts in a directory you have access.
+SET HOME=%HOMEDRIVE%%HOMEPATH%
+
+REM Make cwRsync home as a part of system PATH to find required DLLs
+SET CWOLDPATH=%PATH%
+SET PATH=%CWRSYNCHOME%\BIN;%PATH%
+
+REM Windows paths may contain a colon (:) as a part of drive designation and 
+REM backslashes (example c:\, g:\). However, in rsync syntax, a colon in a 
+REM path means searching for a remote host. Solution: use absolute path 'a la unix', 
+REM replace backslashes (\) with slashes (/) and put -/cygdrive/- in front of the 
+REM drive letter:
+REM 
+REM Example : C:\WORK\* --> /cygdrive/c/work/* REM 
+REM Example 1 - rsync recursively to a unix server with an openssh server :
+REM
+REM       rsync -r /cygdrive/c/work/ remotehost:/home/user/work/
+REM
+REM Example 2 - Local rsync recursively 
+REM
+REM       rsync -r /cygdrive/c/work/ /cygdrive/d/work/doc/
+REM
+REM Example 3 - rsync to an rsync server recursively :
+REM    (Double colons?? YES!!)
+REM
+REM       rsync -r /cygdrive/c/doc/ remotehost::module/doc
+REM
+REM Rsync is a very powerful tool. Please look at documentation for other options. 
+REM
+
+REM ** CUSTOMIZE ** Enter your rsync command(s) here
+
+call :lower %COMPUTERNAME% CN
+
+set L_LOGDIR=/cygdrive/d/tt/auditfiles
+set L_LOGDIR_WIN=d:\tt\auditfiles
+set L_NAK_LOGDIR=/cygdrive/d/tt/logfiles
+set L_NAK_LOGDIR_WIN=d:\tt\logfiles
+set R_LOGDIR=/raid/var_data/pub1/audit/TT/server/%CN%
+set R_NAK_LOGDIR=/raid/var_data/pub2/naks_log/%COMPUTERNAME%
+set R_LOGHOST=chd-sv-tradelogs01
+set R_LOGUSER=ttlogs
+set KEYFILE=/cygdrive/d/id_ttlogs
+set EMAIL_ADDR="d-TTSupport@transmarketgroup.com"
+call :GETTEMPNAME LOGFILE
+echo Logfile file name is %LOGFILE%
+
+DATE/T >>%LOGFILE%
+TIME/T >>%LOGFILE%
+call :PRINT_MESSAGE "Host: %COMPUTERNAME%"
+call :PRINT_MESSAGE "Script: logsync.cmd"
+
+set STATUS=0
+
+call :PRINT_MESSAGE "Creating directory %R_LOGHOST%:%R_LOGDIR%"
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes -T -i %KEYFILE% %R_LOGUSER%@%R_LOGHOST% /bin/mkdir -p %R_LOGDIR% >>%LOGFILE% 2>&1
+IF ERRORLEVEL 1  (
+    set STATUS=1;
+    call :PRINT_MESSAGE "Unable to create directory %R_LOGHOST%:%R_LOGDIR%"
+) else (
+    call :PRINT_MESSAGE "Starting Audit Log Sync..."
+    dir %L_LOGDIR_WIN%\*.csv >NUL 2>&1
+    IF ERRORLEVEL 1  (
+	call :PRINT_MESSAGE "NO CSV FILES FOUND"
+    ) else (
+        call :PRINT_MESSAGE "Sending CSV files..."
+	rsync -avz -e "ssh -o StrictHostKeyChecking=no -o BatchMode=yes -T -i %KEYFILE%" %L_LOGDIR%/*.csv %R_LOGUSER%@%R_LOGHOST%:%R_LOGDIR% >>%LOGFILE% 2>&1
+	IF ERRORLEVEL 1 set STATUS=1
+    )
+    dir %L_LOGDIR_WIN%\*.cba >NUL 2>&1
+    IF ERRORLEVEL 1  (
+	call :PRINT_MESSAGE "NO CBA FILES FOUND"
+    ) else (
+        call :PRINT_MESSAGE "Sending CSV files..."
+	rsync -avz -e "ssh -o StrictHostKeyChecking=no -o BatchMode=yes -T -i %KEYFILE%" %L_LOGDIR%/*.cba %R_LOGUSER%@%R_LOGHOST%:%R_LOGDIR% >>%LOGFILE% 2>&1
+        IF ERRORLEVEL 1 set STATUS=1
+    )
+)
+
+
+
+call :PRINT_MESSAGE "Creating directory %R_LOGHOST%:%R_NAK_LOGDIR%"
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes -T -i %KEYFILE% %R_LOGUSER%@%R_LOGHOST% /bin/mkdir -p %R_NAK_LOGDIR% >>%LOGFILE% 2>&1
+IF ERRORLEVEL 1  (
+    set STATUS=1;
+    call :PRINT_MESSAGE "Unable to create directory %R_LOGHOST%:%R_NAK_LOGDIR%"
+) else (
+    call :PRINT_MESSAGE "Starting Nak Log Sync..."
+    dir %L_NAK_LOGDIR_WIN%\*.log >NUL 2>&1
+    IF ERRORLEVEL 1  (
+	call :PRINT_MESSAGE "NO NAK FILES FOUND"
+    ) else (
+        call :PRINT_MESSAGE "Sending Nak files..."
+	rsync -avz -e "ssh -o StrictHostKeyChecking=no -o BatchMode=yes -T -i %KEYFILE%" %L_NAK_LOGDIR%/*.log %R_LOGUSER%@%R_LOGHOST%:%R_NAK_LOGDIR% >>%LOGFILE% 2>&1
+	IF ERRORLEVEL 1 set STATUS=1
+    )
+)
+
+
+IF %STATUS% NEQ 0 (
+    call :PRINT_MESSAGE "Syncing Audit Logs: Failure"
+    c:\windows\system32\BLAT %LOGFILE% -subject "Failed: Log Archive Transfer" -to %EMAIL_ADDR%
+) else (
+    call :PRINT_MESSAGE "Syncing Audit Logs: Success"
+REM    c:\windows\system32\BLAT %LOGFILE% -subject "Success: Log Archive Transfer" -to %EMAIL_ADDR%
+)
+DEL %LOGFILE%
+GOTO:EOF
+ 
+:GETTEMPNAME
+set TMPFILE=%TMP%\logsync-%RANDOM%-%TIME:~6,5%.tmp
+if exist "%TMPFILE%" GOTO :GETTEMPNAME 
+set %~1=%TMPFILE%
+GOTO:EOF
+  
+:PRINT_MESSAGE
+echo %1 
+echo %1 >>%LOGFILE%
+GOTO:EOF
+
+:lower
+echo>%TMP%\%1
+dir /b/l %TMP%\%1>%TMP%\lower.tmp
+set /p result=<%TMP%\lower.tmp
+del %TMP%\%1
+del %TMP%\lower.tmp
+set %~2=%result%
+GOTO:EOF

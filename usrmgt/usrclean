@@ -1,0 +1,172 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+#   print "YOU ARE HERE ".__FILE__.":".__LINE__."\n";
+###############################################################################
+#WISH LIST
+#
+#  Script Name : usrclean
+#
+#  Description : script to clean up disabled users files.
+#
+#  Unit    : AIS UNIX
+#
+###############################################################################
+#
+#  Date    Programmer         Description
+#  --------  ------------       -------------------------------
+#  3/28/2008  Steve Pribyl       Creation
+#
+###############################################################################
+$|=1; # Don't buffer output
+
+use File::Basename;
+use File::Path;
+use IO::Handle;
+use File::Copy;
+use File::Spec;
+
+#
+#	Get the current programs name
+#
+my ($prgvol,$prgdir,$prgname) = File::Spec->splitpath( $0 );
+my $OS=`/usr/bin/uname`; chomp($OS);
+my $HOME_DIR="/home";
+if ($OS eq "SunOS") {
+	$HOME_DIR="/export/home";
+} 
+
+#
+# Globals
+#
+my $DAYS_OLD=60; #Days to keep tar files
+my $err_flag=0;  #Has an error occured
+my @err_mgs;	 #Array of errors that occured
+my $sLogFile;	 #hold the name of the log file
+
+###############################################################################
+#
+# OPEN the log file
+#
+###############################################################################
+my $hostname=`/usr/bin/uname -n`;
+chomp($hostname);
+
+#
+# Get the current time and create the log name time component
+#
+my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime(time);
+my $date=sprintf "%4d%02d%02d.%02d%02d%02d", $year+1900,$mon+1,$mday,$hour,$min,$sec;
+#
+# Create the log file name
+#
+$sLogFile=">/allstate/log/".$prgname.".log.$hostname.".$date; 
+$sLogFile =~/(\S+)/; 	# Untaint the file name ultimatly does nothing but this is required
+$sLogFile = $1;  		# extracted data is considered safe
+print  "LogFile=$sLogFile\n"; # Print the name of the log file so the job manger know where it is.
+#
+# Open the log file
+#
+open LOGFILE,$sLogFile or die "ERROR: Can't open file: '".$sLogFile."': $!.\n";
+#
+# Redirect the stdout and strerr so we can log what happend
+#
+STDOUT->fdopen( \*LOGFILE, 'w' ) or die $!;
+STDERR->fdopen( \*LOGFILE, 'w' ) or die $!;
+
+
+###############################################################################
+#
+# MAIN
+#
+#  Loop thought the password file looking for disabled users.
+#  If the home directory is /export/home or /home and the uname matches the rest of
+#  the home dir and the owner of the directory matches uname and it exists
+#  then Tar it up and remove it.
+#  If the tar file exists and is more then DAYS_OLD delete it and remove the user.
+###############################################################################
+print "Starting Scan.\n";
+
+#
+# Open /etc/passwd and loop through it.
+#
+open PASSWD,"/etc/passwd" or die "ERROR: Can't open file: '/etc/passwd': $!.  \n";
+while(<PASSWD>) { # Rip through the password file
+	my ($uname,$pwd,$uid,$gid,$gecos,$dir,$shell) = split(":",$_);
+	if( $gecos=~/disable/i) { #if the user is disabled
+		my $found=0;
+		my $basename=basename($dir);
+		my $dirname=dirname($dir);
+		next if($dirname ne $HOME_DIR);  #SKIP if not in /home
+		next if(!(my ($dev,$ino,$mode,$nlink,$fuid,$fgid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks) = stat($dir)));
+		#TODO SKIP NFS HOME DIR 
+		print "Cleaning user $uname\n";
+		if($uname ne $basename) { 
+			$err_mgs[$err_flag]="ERROR: Unable to clean up home dir for $uname:Dir($dir) does not match user name.\n";
+			print $err_mgs[$err_flag];
+			$err_flag++;
+		} elsif ($uid != $fuid) {
+			$err_mgs[$err_flag]="ERROR: Unable to clean up home dir for $uname:Dir($dir) owner($fuid) does not match uid($uid).\n";
+			print $err_mgs[$err_flag];
+			$err_flag++;
+		} else { # Every thing is ok
+			my $tgzfile=$dirname."/disabled_".$basename.".tgz";
+			if(-f $tgzfile) { # Tar file found
+				($dev,$ino,$mode,$nlink,$fuid,$fgid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks) = stat($tgzfile);
+				my $age=time()-$mtime; # Calculate the age of the tar file
+				if($age > $DAYS_OLD*86400) {  #if tool old delete it
+					print "Deleting $tgzfile.\n";
+					if(!unlink($tgzfile)) {   #Delete the tar file
+						$err_mgs[$err_flag]="ERROR: Unable to remove archive file($tgzfile) for $uname:$!.\n";
+						print $err_mgs[$err_flag];
+						$err_flag++;
+					}
+					print "Deleteing user $uname.\n";
+					if(system("/allstate/scripts/usrmgr -r ".$uname)) { # delete the user
+						$err_mgs[$err_flag]="ERROR: Unable to remove user $uname:$!.\n";
+						print $err_mgs[$err_flag];
+						$err_flag++;
+					}
+				}
+			} else { # Tar file not found so create it
+				print "Creating $tgzfile.\n";
+				if(system("tar -cf - $dir | gzip > ".$tgzfile)) { # Create the tar file
+					$err_mgs[$err_flag]="ERROR: Unable to create archive file($tgzfile) for $uname:$!.\n";
+					print $err_mgs[$err_flag];
+					$err_flag++;
+				} else { # I was able to create the tar file so remove the home dir
+					print "Deleting $dir.\n";
+					if(!rmtree($dir,0,0)) {
+						$err_mgs[$err_flag]="ERROR: Unable to clean home dir($dir) for $uname:$!.\n";
+						print $err_mgs[$err_flag];
+						$err_flag++;
+					}
+				}
+			}
+		}
+	}
+}
+print "Finished.\n";
+
+#
+# We are done so mail any errors to AIS-Unix
+#
+if ($err_flag) {
+	my $sendmail = "/usr/sbin/sendmail -t"; 
+	my $reply_to = "Reply-to: aisecure\@allstate.com\n";
+	my $send_to = "To: aisecure\@allstate.com\n";
+	my $subject = "Subject: Access Control Unix\n";
+
+	open(SENDMAIL, "|$sendmail") or die "Cannot open $sendmail: $!";
+	print SENDMAIL $reply_to;
+	print SENDMAIL $subject;
+	print SENDMAIL $send_to;
+	print SENDMAIL "Content-type: text/plain\n\n";
+	print SENDMAIL "\n\nProblems occured while cleaning disabled users!\n\n";
+	print SENDMAIL "LogFile:\n";
+	print SENDMAIL "\t\"$sLogFile\"\n";
+	for(my $i=0;$i<$err_flag;$i++) {
+		print SENDMAIL $err_mgs[$i];
+	}
+	close(SENDMAIL); 
+}

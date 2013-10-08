@@ -1,0 +1,19 @@
+<Conrep>
+	<Section name="DisableMemoryPrefailureNotification">
+		<helptext><![CDATA[ECC Alerting]]></helptext>		
+		<ev>CQHGV3</ev>
+                <value id="0x04">E, E</value>
+                <value id="0x14">D, E</value>
+                <value id="0x34">D, D</value>
+                <byte>00</byte>
+	</Section>
+	<Section name="PowerMonitoring">
+		<helptext><![CDATA[SMI Power Monitoring.]]></helptext>		
+                <ev>CQHGV3</ev>
+                <length>1</length>
+                <value id="0x00">Enabled</value>
+                <value id="0x10">Disabled</value>
+		<mask>0x10</mask>
+                <byte>00</byte>
+	</Section>
+</Conrep>

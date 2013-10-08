@@ -1,0 +1,128 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+### JOBNAME: dsgetuid
+###
+### DESCRIPTION: Finds uids for new userids. Script is run online and
+###                is interactive.
+### APPLICATION NAME: 
+###
+### ERROR HANDLING INSTRUCTIONS: none
+### DATE IN
+###
+### JOB FREQUENCY: n/a This runs interactive
+###
+### EARLY START TIME: n/a
+###
+### ESTIMATED RUN TIME: seconds
+###
+### JOB DEPENDENCIES: n/a
+###
+### JOB USERID:  runs under user's userid
+###
+###################################################################
+#                   Script maintenance history #
+###################################################################
+#
+#   02/28/01   Guy Robbins (AIS department) AUTHOR OF SCRIPT
+#   04/15/09   SJP rewrite in perl
+############################################################################## 
+#  required files /allstate/log/dsuid.log  ftp from AIS
+#                /allstate/log/dsuid2.log  next uid to assign
+#                /allstate/log/dsnewuid.log uids added by this code
+#                /allstate/log/.dsuid.lock lock file
+$|=1;  #Turn off STDOUT buffering
+
+use Fcntl ':flock'; # import LOCK_* constants
+use File::Copy;
+use FileHandle;
+
+#my $prefix="/export/home/spr4h/tmp";	### test
+my $prefix="/allstate/log";				### prod
+my $userid=$ARGV[0];					### Get the first cli argument
+
+
+###################################################
+##  check for errors
+
+if (!defined $userid)  {                              ### userid entered
+   print "ERROR you must enter a userid\n";
+   exit 1;
+}
+if ( ! -f "$prefix/dsuid.log" ) {             ### check for uid file
+   print "ERROR**** $prefix/dsuid.log not found.  Contact AIS :$! \n";
+   exit 1;
+}
+if ( ! -f "$prefix/dsuid2.log" ) {             ### check for nextuid file
+   print "ERROR**** $prefix/dsuid2.log not found.  Contact AIS :$! \n";
+   exit 1;
+}
+
+###################################################
+##   process
+### if new id get next uid and update file with next uid
+
+# Lock the dsuid.lock file to prevent collisions.
+my $LOCK_FILE="$prefix/.dsuid.lock";
+my $LOCK;
+open $LOCK,">",$LOCK_FILE or die "ERROR: Could open lock $LOCK_FILE: $!\n";
+$LOCK->autoflush(1);		# Set the lock file to autoflush, since 
+							# we aren't going to close it, but 
+							# let the file close when the program exits
+							# This lets us force the pid in the open file
+							# for debugging.
+flock($LOCK,LOCK_EX);		# lock the file
+print $LOCK "$0 $$\n";		# write the pid to the lock file
+
+my $found=0; 				#if >0 then found the uname and uid
+open INPUT,"$prefix/dsuid.log" or die "ERROR***** Can't open $prefix/dsuid.log. Contact AIS:$!\n";
+while(my $line=<INPUT>) {   	#read each line of the file
+	if($line =~/^$userid /) {	#Does the uname match the line
+		$found=1;
+		print "$line";
+	}
+}
+close INPUT;
+
+#
+# Next if not found yes then search the new uid file
+#
+if ( !$found && -f "$prefix/dsnewuid.log" ) {             ### check for newuid file
+	open INPUT,"$prefix/dsnewuid.log" or die "ERROR***** Can't open $prefix/dsnewuid.log. Contact AIS:$!\n";
+	while(my $line=<INPUT>) {
+		if($line=~/^$userid /) {
+			$found=1;
+			print "$line";
+		}
+	}
+	close INPUT;
+}
+
+#
+# If still not found then generate a new uid
+#
+if(!$found) {
+	print "$userid NOT found on current hosts\n";
+	#
+	# Read the nextuid file
+	#
+	open INPUT,"<$prefix/dsuid2.log" or die "ERROR***** Can't open $prefix/dsuid2.log. Contact AIS:$!\n";   # Open dsuid2
+	my $line=<INPUT>;
+	chomp($line);
+	close INPUT;
+	my ($text,$nextuid)=split(":",$line);
+	open OUTPUT,">>$prefix/dsnewuid.log" or die "ERROR***** Can't open $prefix/dsnewuid.log. Contact AIS:$!\n";   # Add to new allocated
+	print OUTPUT "$userid $nextuid <GID> <HOST>\n";   # Add to new allocated file
+	close OUTPUT;
+	print "Sugguested UID is $nextuid\n";
+	#
+	# Write the nextuid file with the update nextuid
+	#
+	$nextuid++;
+	open OUTPUT,">$prefix/dsuid3.log" or die "ERROR***** Can't open $prefix/dsuid3.log. Contact AIS:$!\n";   # Add to new allocated
+	print OUTPUT "nextuid:$nextuid\n";   
+	close OUTPUT;
+	copy("$prefix/dsuid3.log","$prefix/dsuid2.log");
+	unlink("$prefix/dsuid3.log");
+}
+

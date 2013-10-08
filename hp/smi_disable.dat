@@ -1,0 +1,4 @@
+<Conrep>
+  <PowerMonitoring>0x10</PowerMonitoring>
+  <DisableMemoryPrefailureNotification>1</DisableMemoryPrefailureNotification>
+</Conrep>

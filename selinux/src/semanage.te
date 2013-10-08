@@ -1,0 +1,28 @@
+module semange 1.0.0;
+require {
+	class dir search;
+	class chr_file read;
+	class file read;
+	class sock_file write;
+	class process signal;
+	class capability ipc_lock;
+	class unix_stream_socket connectto;
+
+	type semanage_t;
+	type random_device_t;
+	type sysctl_crypto_t;
+	type initrc_t;
+	type var_run_t;
+} 
+
+
+#============= semanage_t ==============
+allow semanage_t random_device_t:chr_file read;
+allow semanage_t self:process signal;
+allow semanage_t sysctl_crypto_t:dir search;
+allow semanage_t self:capability ipc_lock;
+allow semanage_t sysctl_crypto_t:file read;
+
+allow semanage_t initrc_t:unix_stream_socket connectto;
+allow semanage_t var_run_t:sock_file write;
+

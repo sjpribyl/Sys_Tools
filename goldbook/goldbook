@@ -1,0 +1,1493 @@
+#!/usr/local/bin/perl5.004
+# MODIFY THIS VERSION NUMBER AND DATE WHEN MAKING CHANGES 
+$goldbook_rev = "v3.6.0 07/28/99";
+
+
+#----------------------------------------------------------------------------#
+# Name: Goldbook
+#
+# Description: Generate a picture of this server.
+#
+# Author: Steve Pribyl
+#
+# Wish list:
+#
+# Modifications: - 
+#
+# 07/28/99 Steve Pribyl
+#       Added logic for new version of schrobot software
+#
+# 06/24/99 Steve Pribyl
+#       Added logic for new emc Solutions Enabler software(symcli)
+#       Corrected psudeo device problem with INQ.  They are now ignored.
+#
+# 02/24/99 Steve Pribyl
+#       Fix Network logic 
+#       Added some files
+#       Change kernel info on HP-UX 11.00 to kmtune -l.
+#
+# 02/08/99 Steve Pribyl
+#       Added logic to get backup configuration information
+#       Added logic for uptime
+#
+# 07/13/98 Steve Pribyl
+#	Changed patch history to patch list use swlist -l fileset 
+#	Change 10 logic to be not 09 so HP-UX 11.00 will work
+#	Changed "or die" to "or print".
+#	Get DNS information
+#
+# 07/13/98 Steve Pribyl
+#	Change swlist logic to list the bundles instead of the products
+#
+# 05/20/98 Steve Pribyl
+# 	Added logic to check ps for oracle or sybase databases
+#
+# 05/12/98 Steve Pribyl
+#	Added logic to not print alternate link messages when doing lvlnboot.
+#
+# 3/30/98  Steve Pribyl
+#	Fixed error in network area.  Problem caused by error in routing setup 
+#	on server but is was easier to fix here.
+#
+# 1/26/98  Steve Pribyl
+#	Added logic for AIX.
+#	Corrected problem with the inq command on HP-UX. Caused rev problem.
+#
+# 12/03/97 Steve Pribyl
+#	Unify 2 differing versions of goldbook script.
+#
+# 11/17/97 Steve Pribyl
+#  Added logic for lvlnboot -v on hp systems.
+#
+# 10/31/93 Steve Pribyl
+#  Mucked with the HP hardware area.  Added diskinfo command to get disk size.
+#
+# 10/28/97 Steve Pribyl
+#  Re wrote the NCR network logic to look just line the HP version.
+#
+# 10/27/97 Steve Pribyl
+#
+#  Correct logic for printing multipul slices on logical volume on same disk.
+#
+# 10/10/97 Steve Pribyl
+#
+#  Added logic for stripping, it is now pretty.
+#  Added login for inq to get disk serial numbers and sizes make for easier 
+#  disk space calculations.
+#
+# 10/14/96  Rev. 2.0	Dean J. Pompilio
+#
+#  I finished adapting this script to run on NCR systems.  All of Steve's code
+#  should run as written.  The only difference is that I have added some    
+#  separators between sections to make reading the report easier.
+#  Steve's original comments are below.
+#
+# 09/11/97 Steve Pribyl
+# 
+#  On NCR added logic to print all HW infromation from prfconf in the HW area.
+#  Corrected funky gateway stuff.
+#  Get /etc/fstab or /etc/vfstab instead of /etc/checklist
+#
+# 08/26/97 Steve Pribyl
+# 
+#  Added logic to get physical memory from the syslog file.  This function
+#  does not work on HP-UX 9.x  and does not yet work on NCR systems.
+#  Get the serial number from the /usr/adm/goldbook/other file.
+#  Added logic to print the other and contacts files.
+#
+# Steve Pribyl  - added this comment and original comments.
+#               - changed print to echo
+#               - removed bdf and replaced with /etc/checklist 
+#               - Removed vgscan, not needed already in vgdisplay
+#               - Removed output file from script to allow redirection
+#               - Converted to perl
+#               - added many wishes
+#               - added PV display logic for each PV.
+#               - added logic to show HW path and unsed PV HP-UX 10 only
+#               - added report selection options
+#               - added model logic to HP uname
+#               - added /usr/spool/cron/crontabs/root
+#
+#============================ End Revision History ==========================#
+
+sub TitleBanner
+{
+  local( $title ) = @_;
+  print "\n";
+  print "******************************************************************\n";
+  print "**********  $title\n";
+  print "******************************************************************\n";
+  print "\n";
+}
+
+
+sub StartBanner
+{
+  local( $start ) = @_;
+  print "\n";
+  print "------------------------------------------------------------------\n";
+  print "----------  START: $start\n";
+  print "------------------------------------------------------------------\n";
+  print "\n";
+}
+
+
+sub EndBanner
+{
+  local( $end ) = @_;
+  print "\n";
+  print "==================================================================\n";
+  print "==========  END: $end\n";
+  print "==================================================================\n";
+  print "\n";
+}
+
+
+#-----------------------------------------------------------------------------#
+#	CheckPlatform                                                         #
+#-----------------------------------------------------------------------------#
+sub CheckPlatform {
+  # Determine whether this script is running on an HP or NCR system.
+  open(PLATFORM,"uname -a |") or print "Can't run 'uname -a'. $!\n";
+  while (<PLATFORM>) {
+    if(/^HP-UX/) { $platform = "HP"; }
+    elsif(/^AIX/) { $platform = "AIX"; }
+    else { $platform = "NCR"; }
+  close PLATFORM;  
+  }
+}
+
+
+#-----------------------------------------------------------------------------#
+#	Date this report                                                      #
+#-----------------------------------------------------------------------------#
+sub GetDate
+{
+  require 'ctime.pl';
+  print &ctime( time ),"\n";
+}
+
+
+#-----------------------------------------------------------------------------#
+#	Title this report                                                     #
+#-----------------------------------------------------------------------------#
+sub MakeTitle
+{
+  &TitleBanner("Goldbook ($goldbook_rev) for $hostname ($platform system)");
+  print "\nThis report was run on "; GetDate;
+  print "System Information:\n\n";
+  print "$uname\n\n";
+
+  $database="";
+  open INPUT,"/usr/bin/ps -eaf | grep oracle |";
+  while(<INPUT>)
+  {
+    $line=$_;
+    next if ($line=~/grep/);
+    if ($line=~/oracle/) { $database="$database Oracle"; last; }
+  }
+  
+  open INPUT,"/usr/bin/ps -eaf | grep sybase |";
+  while(<INPUT>)
+  {
+    $line=$_;
+    next if ($line=~/grep/);
+    if ($line=~/sybase/) { $database="$database Sybase"; last; }
+  }
+   
+  if ($database ne "") { print "Database:$database\n";}
+  $uptime=`uptime`;
+  ($junk,$uptime)=split("up",$uptime);
+  ($uptime,$junk)=split(",",$uptime);
+  if ($uptime ne "") { print "Uptime:$uptime\n";}
+}
+
+#----------------------------------------------------------------------------#
+#	Special informaion from the other file                               #
+#----------------------------------------------------------------------------#
+sub GetOther
+{
+  open OTHERFILE,"/usr/adm/goldbook/other";
+  $serialNumber=""; # Serial number
+  $otherCount=0;
+  while (<OTHERFILE>)
+  {
+     next if /^#/;
+     next if /^$/;
+     $line=$_;
+     chop($line);
+     if ($otherCount==0) {$serialNumber=$line};
+     $otherCount++;
+  }
+}
+
+#----------------------------------------------------------------------------#
+#	Get the name, OS, OS Version and Hardware ID of server               #
+#----------------------------------------------------------------------------#
+sub GetSystem
+{
+  $hostname=`uname -n`;
+  chop( $hostname );
+  $uname=`uname -a`;
+  chop($uname);
+  ($rest,$rev,$rest)=split(/\./,$uname,3);
+  if( ($platform eq "HP") && ($rev ne "09") )
+  {
+    $model=`model`;  
+    chop($model);
+    ($os,$myname,$ver,$stuff,$junk,$mid,$ul)=split(" ",$uname,7);
+    $uname="$os $myname $ver $stuff $model $mid $ul";
+  }
+  if ( $platform eq "NCR" )
+  {
+    $stuff=`cat /etc/.relid`;
+    chop($stuff);
+    ($junk,$junk,$stuff,$junk,$junk,$junk,$junk,$level,$junk)=split(" ",$stuff,9);
+    ($os,$myname,$ver,$junk,$num,$ul)=split(" ",$uname,6);
+    if ( $level ) { $stuff=$level; }
+    $uname="$os $myname $ver $stuff $num $ul";
+  }
+  if ( $platform eq "AIX" )
+  {
+  }
+  $uname=$uname." $serialNumber";
+}
+
+#----------------------------------------------------------------------------#
+#	Scan the server's hardware and report on:  LAN cards, SCSI adapters, #
+#	Disks, TTYs, Tape drives, Processors and Memory.                     #
+#----------------------------------------------------------------------------#
+sub GetHW {
+  &TitleBanner("Hardware Information");
+  &StartBanner("Hardware currently found on server ");
+
+  #-------------------------------- HP --------------------------------------#
+  if( $platform eq "HP" ) 
+  {
+    %inq="";
+#    $INPUT="/opt/symmapps/packages/SInquiry/1.0.1/bin/inq |";
+    $INPUT="/opt/symmapps/bin/inq -nodots |";
+    open INPUT or print "Unable to execute $INPUT. \n";
+    while (<INPUT>) 
+    { 
+      $line=$_;
+      chop($line);
+      next if ( $line!~/dev/ );
+      next if ( $line=~/pseudo/ );
+      ($dev,$vend,$prod,$frev,$ser,$size)=split(':',$line,6);
+      $junk=`/usr/sbin/lssf $dev 2>/dev/null`;
+      ($rest,$rest,$rest,$rest,$rest,$rest,$rest,$rest,$rest,$rest,$rest,$rest,$rest,$rest,$dev,$rest)=split(" ",$junk,16);
+      $inq{$dev}.="                  INQ:       $frev   :   $ser    :    $size\n";
+    }
+    close INPUT;
+    $INPUT="/usr/sbin/ioscan -fn |";
+    open INPUT or print "Unable to execute $INPUT. \n";
+    while (<INPUT>) 
+    { 
+      $line=$_;
+      print;
+      ($rest,$junk,$dev,$stuff)=split(" ",$line,4);
+      if ($type=~/disk/) { system("/usr/sbin/diskinfo $junk 2>&1 "); }
+      if ($rest=~/disk/) { $type=$rest } else { $type="" };
+      print $inq{$dev};
+    }
+    $memory="???";
+    if ( $rev ne "09")
+    {
+      $INPUT="/usr/adm/syslog/syslog.log";
+    }
+    open INPUT;
+    while (<INPUT>)
+    {
+      $line=$_;
+      chop($line);
+      if($line=~/Physical\:/)
+      {
+        ($junk,$junk,$junk,$junk,$junk,$junk,$memory,$junk)=split(" ",$line,8);
+        last;
+      } 
+    }
+    close INPUT;
+    print "Physical Memory $memory Kb\n";
+  } 
+
+  #-------------------------------- NCR -------------------------------------#
+  if( $platform eq "NCR" ) 
+  {
+
+    open(PCB,"/usr/sbin/prtconf |") or print "Can't run prtconf.  $!\n";
+    while (<PCB>) { print; }
+    close(PCB);
+  } 
+  if( $platform eq "AIX" ) 
+  {
+    open(INPUT,"/usr/sbin/lsdev -C |") or print "Can't run lsdev.  $!\n";
+    while (<INPUT>) { print; }
+    close(INPUT);
+  }
+  &EndBanner("Hardware currently found on server ");
+}
+  
+#----------------------------------------------------------------------------#
+# 	Get list of codewords on system                                      #
+#----------------------------------------------------------------------------#
+sub GetCodewords
+{
+  if( $platform eq "HP" ) 
+  {
+    &StartBanner("System Codewords");
+
+    if ( $rev eq "09" )
+    {
+      $INPUT="/etc/update.lib/codewords";
+    }
+    else
+    {
+      $INPUT="/usr/adm/sw/.codewords";
+    }
+    open INPUT or return "Unable to get codewords.\n";
+    while (<INPUT>) { print; }
+    print "\n";
+  }
+  &EndBanner("System Codewords");
+}
+
+
+#----------------------------------------------------------------------------#
+#	Get list of products that are installed.                             #
+#----------------------------------------------------------------------------#
+sub GetProducts
+{
+  &StartBanner("Products Installed");
+
+  #-------------------------------- HP --------------------------------------#
+  if( $platform eq "HP" ) {
+    if ( $rev eq "09" )
+    {
+      $INPUT="ls -1 /etc/filesets |";
+      open INPUT or print "Unable to execute ls -1 /etc/filesets. \n";
+      while (<INPUT>)
+      {
+        $fileset=$_;
+        chop($fileset);
+        $INDEX="/system/".$fileset."/index";
+        open INDEX or print "   ".$fileset." ---\n";
+        while (<INDEX>)
+        {
+          ($rest,$junk)=split(" ",$_,2);
+          if($rest eq "fd:") { $descript=$junk };
+        }
+        chop($descript);
+        print "   ".$fileset." --- ".$descript."\n";
+      }
+      print "\n";
+    }
+    else
+    {
+      $INPUT="/usr/sbin/swlist |";
+      open INPUT or print "Unable to execute swlist. \n";
+      while (<INPUT>) { print "   ".$_; }
+      print "\n";
+    }
+  }
+  #-------------------------------- NCR ------------------------------------#
+  if( $platform eq "NCR" ) 
+  {
+    # Run pkginfo -x to get all installed software.  But exclude all patches.
+    open(PRODUCTS,"/usr/bin/pkginfo -x|") or print "Can't run pkginfo -x.  $!\n";
+    while (<PRODUCTS>) { print if (!/^PBA.*/); }
+    close(PRODUCTS);
+  }
+  if( $platform eq "AIX" ) 
+  {
+    open(PRODUCTS,"/usr/bin/lslpp -L|") or print "Can't run lslpp -L.  $!\n";
+    while (<PRODUCTS>) { print; }
+    close(PRODUCTS);
+  }
+  &EndBanner("Products Installed");
+}
+
+
+#---------------------------------------------------------------------------#
+#	Get list of all installed patches.                                  #
+#---------------------------------------------------------------------------#
+sub GetPatches
+{
+  &StartBanner("Patches Installed");
+
+  #-------------------------------- HP  ------------------------------------#
+  if( $platform eq "HP" )
+  {
+    if ( $rev eq "09" )
+    {
+      $INPUT="ls -d /system/*[A-Z]_*[1-9] |";
+      open INPUT or print "Unable to find /system/*[A-Z]_*[1-9]. \n";
+      while (<INPUT>) { print; }
+    }
+    else
+    {
+      $INPUT="/usr/sbin/swlist -l fileset -a state -a title |";
+      open INPUT or return;
+      while (<INPUT>) 
+      { 
+        next if /^#/;
+        next if !(/PH/);
+        print; 
+      }
+    }
+    print "\n";
+  }
+  if( $platform eq "NCR" )
+  {
+
+  #-------------------------------- NCR ------------------------------------#
+    # Run pkginfo -x to get all installed software.  Only display patches.
+    open(PATCHES,"/usr/bin/pkginfo -x|") or print "Can't run pkginfo -x.  $!\n";
+
+    # If a line matches, set counter c=2.  If no match dec c.  As long as 'c' 
+    # is > 0, the conditional will be reevalulated.  When c=0, two lines have
+    # been printed and the 'if' falls through.
+    while (<PATCHES>) { print if (/^PBA.*/ ? ($c = 2) : (--$c > 0)); }
+
+    close(PATCHES);
+  }
+  if( $platform eq "AIX" )
+  {
+  }
+
+  &EndBanner("Patches Installed");
+}
+
+
+#---------------------------------------------------------------------------#
+#	Print the current strip and reset the counter and array
+#---------------------------------------------------------------------------#
+sub PrintStripe
+{
+  foreach $key (keys(%stripeCurrent))
+  {
+     ($start,$stop)=split(",",$stripeCurrent{$key});
+     printf "   %-20s %s-%s  \n",$key,$start,$stop;
+  }
+  %stripeCurrent=""; #RESET Array
+}
+
+#---------------------------------------------------------------------------#
+#	Get Logical Volume Layout                                           #
+#---------------------------------------------------------------------------#
+sub GetLVM
+{
+  &StartBanner("Logical Volume Manager Information");
+  #-------------------------------- NCR ------------------------------------#
+  if( $platform eq "AIX" )
+  {
+    $INPUT="/usr/sbin/lsvg |";
+    open INPUT or print "Unable to execute $INPUT command.\n";
+    while (<INPUT>) 
+    {
+      $vgLine=$_;
+      chop($vgLine); 
+      $VG="/usr/sbin/lsvg ".$vgLine." |";
+      open VG or print "Unable to execute $VG command.\n";
+      while (<VG>) { print "     ".$_; }        
+      $VG="/usr/sbin/lsvg -l ".$vgLine." |";
+      open VG or print "Unable to execute $VG command.\n";
+      while (<VG>) 
+      {
+        $lvLine=$_;
+        next if($lvLine=~/$vgLine/);
+        next if($lvLine=~/LV NAME/);
+        print "\n";
+        ($lvName,$rest)=split(" ",$lvLine,2);
+        $LV="/usr/sbin/lslv ".$lvName." |";
+        open LV or print "Unable to execute $LV command.\n";
+        while (<LV>) { print "     ".$_; }        
+        print "\n";
+        $LV="/usr/sbin/lslv -l ".$lvName." |";
+        open LV or print "Unable to execute $LV command.\n";
+        while (<LV>) { print "     ".$_; }        
+      }
+      $PVG="/usr/sbin/lsvg -p ".$vgLine." 2>&1 |";
+      open PVG or print "Unable to execute $PVG command.\n";
+      while (<PVG>) 
+      {
+        $pvLine=$_;
+        chop($pvLine);
+        next if($pvLine=~/$vgLine/);
+        next if($pvLine=~/PV_NAME/);
+        print "\n";
+        $PV="/usr/sbin/lspv ".$pvLine." |";
+        open PV or print "Unable to execute $PV command.\n";
+        while (<PV>) { print "     ".$_; }        
+        $PV="/usr/sbin/lspv -l ".$pvLine." |";
+        open PV or print "Unable to execute $PV command.\n";
+        while (<PV>) { print "     ".$_; }        
+      }
+    }
+  }
+
+  if( $platform eq "NCR" )
+  {
+    $INPUT="/sbin/volprint -l |";
+    open INPUT or print "Unable to execute $INPUT command.\n";
+    while (<INPUT>) 
+    {
+       print $_;
+#      $line=$_;
+#      chop($line);
+#      ($type,$name,$accoc,$kstate,$length,$junk)=split(" ",$line);
+#      next if($type eq "TYPE");
+#      $volprt{$name}.="$accoc,$kstate,$length";
+    }
+
+    # Show disk layout
+    $INPUT="/usr/bin/ls /dev/rdsk/c*s0 |";
+    open INPUT or print "Unable to execute $INPUT command.\n";
+    while (<INPUT>) 
+    {
+      $disk=$_;
+      chop($disk);
+      system("/sbin/prtvtoc -f /tmp/goldbook.vtoc $disk");
+      system("cat /tmp/goldbook.vtoc");
+    }
+  }
+  #-------------------------------- HP  ------------------------------------#
+  if( $platform eq "HP" )
+  {
+    $INPUT="/sbin/lvlnboot -v |";
+    open INPUT or print "Unable to execute $INPUT command.\n";
+    while (<INPUT>) # Make a list of bdf
+    {
+      $line=$_;
+      next if($line=~/alternate/); # skip header
+      print;
+    }
+    $INPUT="bdf |";
+    open INPUT or print "Unable to execute bdf command.\n";
+    while (<INPUT>) # Make a list of bdf
+    {
+      ($lvName,$size,$used,$avail,$used,$direct)=split(" ",$_,6);
+      $bdf{$lvName}.=$direct
+    }
+    $INPUT="/etc/fstab";
+    open INPUT or print "Unable to open /etc/fstab.\n";
+    while (<INPUT>) # Make a list of stuff in /etc/fstab
+    {
+      ($lvName,$direct,$rest)=split(" ",$_,3);
+      $checklist{$lvName}.=$direct
+    }
+    if ( $rev ne "09" ) # HPUX 10 only
+    {
+      $pvPath="";
+      # Get list of disk and the HW path for each disk
+      $INPUT="/usr/sbin/ioscan -kfnC disk |";  # get list of disks on system
+      open INPUT or print "Unable to execute ioscan. \n";
+      while (<INPUT>)
+      {
+        ($class,$junk,$hwpath,$drive,$junk,$type,$des1,$des2,$junk)=split(" ",$_,9);
+        if($pvPath ne "")
+        {
+          $hwPathList{$class}.=$pvPath;
+          $pvPath="";
+        }
+        if ($class eq "disk" && $des2 ne "CD-ROM")
+        {
+          $pvPath=$hwpath;
+        }
+      }
+    }
+      # Get the LVM information
+    $INPUT="/usr/sbin/vgdisplay -v |";
+    open INPUT or print "Unable to execute vgdisplay command.\n";
+    $lvName="";
+    while (<INPUT>)
+    {
+      $vgLine=$_;
+      ($type,$caption,$name,$rest)=split(' ',$vgLine,4);
+
+      if (($type eq "Total") && ($caption eq "PE") ) { $totalPE=$name;}
+      if ($type eq "Alloc") { $allocPE=$name;}
+      # get the name of the logical volume
+      if($type eq "LV" && $caption eq "Name")       
+      {
+        $lvName=$name;
+        $direct=$bdf{$lvName};                 # is the volume mounted
+        $check=$checklist{$lvName};            # is it in /etc/fstab
+
+        # volume mounted correctly and in /etc/fstab
+        if($direct ne "" && $check ne "")      
+        {
+          chop($vgLine);
+          $vgLine.=" mounted on ".$direct;
+        }
+
+        # volume not mounted  but in /etc/fstab
+        if($direct eq "" && $check ne "")     
+        {
+          chop($vgLine);
+          $vgLine.=" not mounted on ".$check.", but in /etc/fstab\n";
+        }
+
+        # volume mounted but not in /etc/fstab
+        if($direct ne "" && $check eq "")      
+        {
+          chop($vgLine);
+          $vgLine.=" mounted on ".$direct.", not in /etc/fstab\n";
+        }
+        $pvName=""; # reset the $pvName var for later use in this VG
+      }
+      if($type eq "Used")
+      {
+        print $vgLine;
+        $part=1;
+        $LOGICAL="/usr/sbin/lvdisplay -v ".$lvName." |";
+        open LOGICAL or print "Unable to execute lvdisplay. \n";
+        while(<LOGICAL>)
+        {
+          $lvLine=$_;
+          ($itm1,$itm2,$itm3,$rest)=split(' ',$lvLine,4);
+          if($part==1 && $itm2 eq "Distribution" )
+          {
+            $part=2;
+            next;
+          }
+          if($part==2 && $itm2 eq "Logical" && $itm3 eq "extents")
+          {
+            $part=3;
+            print "   Primary              PE           Mirror               PE\n";
+            next;
+          }
+          if($part==1) # section 1 General logical volume info
+          {
+            next if($itm2 eq "Logical"); # skip header
+            next if($itm2 eq "Name");    # skip vg and lv name
+            next if($itm1 eq "LV" && $itm2 eq "Status"); # skip LV Status
+            next if($itm1 eq "LV" && $itm2 eq "Size"); # skip LV Size
+            next if($itm2 eq "LE"); # skip logical Extents used
+            next if($itm2 eq "PE"); # skip disk Extents used
+            if ($itm1 eq "Stripes") 
+            {
+              if ( $itm2 != 0) 
+              {
+                $stripes=$itm2-1; # remember number stripes -1 for 0 to n counting
+                %stripeCurrent=""; # here is were we will store the strip info.
+              } 
+              else #NO stripping so just reset stuff
+              {
+                $stripes=0;
+                %stripeCurrent="";
+              }
+            }
+            print "   ".$lvLine;
+          }
+
+          # section 2 these are the disks used by the volume.  SKIPPED
+          if($part==2)
+          {
+            next if($itm2 eq "PV"); # skip title for disks
+          }
+          if($part==3)
+          {
+            next if($itm2 eq "PV1"); # skip title for disks
+            if ( $stripes gt 0)  # if striped lvm
+            {
+              ($pLE,$pPV,$pPE,$pST,$mPV,$mPE,$mST)=split(' ',$lvLine,7);  # mirroring not used but done for effect.
+              if ( $pPV eq "") { PrintStripe; }
+              next if ($pPV eq "" );
+              if ($stripeCurrent{$pPV} eq "" ) # if not in array the add it
+              {
+                if ( keys(%stripeCurrent) le $stripes ) # still looking for dev
+                {
+                  $stripeCurrent{$pPV}.="$pPE,$pPE";
+                }
+                else #To many devs print the array
+                {
+                  PrintStripe;
+                  $stripeCurrent{$pPV}.="$pPE,$pPE"; # add current disk
+                }
+              }
+              else
+              {
+                ($start,$stop)=split(",",$stripeCurrent{$pPV});
+                if ( $stop != $pPE ) { $stripeCurrent{$pPV}="$start,$pPE";}
+              }
+            }
+            else # unstriped lvm
+            {
+              if ($oPLE eq "" )    # if there is not old line yet fake one
+              {
+              # remember first
+                ($oPLE,$oPPV,$oPPE,$oPST,$oMPV,$oMPE,$oMST)=split(' ',$lvLine,7); 
+              # remember last
+                ($lPLE,$lPPV,$lPPE,$lPST,$lMPV,$lMPE,$lMST)=split(' ',$lvLine,7); 
+              }
+
+              #break up the record
+              ($pLE,$pPV,$pPE,$pST,$mPV,$mPE,$mST)=split(' ',$lvLine,7); 
+              # drive primary or mirror name change 
+              # primary current pe == last pe+1
+              # mirror current pe == last pe+1
+              if(($pPV ne $oPPV) || ($mPV ne $oMPV) || (($pPE != $lPPE+1) && ($pPE != $lPPE)) || (($mPE != $lMPE+1) && ($mPE != $lMPE)))
+              {
+                printf "   %-20s %s-%s    %-20s %s-%s\n",$oPPV,$oPPE,$lPPE,$oMPV,$oMPE,$lMPE;
+                # new first
+                ($oPLE,$oPPV,$oPPE,$oPST,$oMPV,$oMPE,$oMST)=split(' ',$lvLine,7); 
+              }
+              # new last
+              ($lPLE,$lPPV,$lPPE,$lPST,$lMPV,$lMPE,$lMST)=split(' ',$lvLine,7);   
+            }
+          }
+        }
+        print "\n";
+        next;
+      }
+      if($type eq "PV" && $caption eq "Name") # First line in PV Block
+      {
+        $pvName=$name; # remember the name of this PV
+        if ( $rev ne "09" )  # if HPUX 10 add the HW path to the line
+        {
+          chomp($rest);
+          $vgLine="   ".$type." ".$caption."                     ".$pvName." - ".$hwPathList{$pvName}." ".$rest."\n";
+          $hwPathList{$pvName}="";
+        }
+      }
+      if($type eq "PV" && $caption eq "Status") # Second line in PV Block
+      {
+        print $vgLine;   # print the PV Status line
+        $vgLine="";
+        $PHYSICAL="/usr/sbin/pvdisplay ".$pvName." |";
+        open PHYSICAL or print "Unable to execute lvdisplay. \n";
+        while(<PHYSICAL>)
+        {
+          $pvLine=$_;
+          ($itm1,$itm2,$itm3,$rest)=split(' ',$pvLine,4);
+          if($itm1 eq "Allocatable" ) { print "   ".$pvLine; }
+          if($itm1 eq "VGDA" ) { print "   ".$pvLine; }
+          if($itm1 eq "Cur" ) { print "   ".$pvLine; }
+          if($itm1 eq "PE" ) { print "   ".$pvLine; }
+          if($itm1 eq "Total" ) { $pvTotal=$itm3; }
+          if($itm1 eq "Allocated" ) { $allocated="   ".$pvLine; $pvAlloc=$itm3 }
+          if($itm1 eq "Stale" ) { $stale="   ".$pvLine; }
+        }
+      }
+      # First line in PV Block
+      if($type eq "Free" && $caption eq "PE" && $pvName ne "") 
+      {
+        $lvName="";
+        print $allocated; # print Allocatied PE
+        print $vgLine;   # print the Free PE line
+        print $stale;     # print Stale PE
+        $vgLine="";      # clear, will print blank line later
+        $part=1;
+        $PHYSICAL="/usr/sbin/pvdisplay -v ".$pvName." |";
+        open PHYSICAL or print "Unable to execute lvdisplay. \n";
+        while(<PHYSICAL>)
+        {
+          $pvLine=$_;
+          ($itm1,$itm2,$itm3,$rest,$junk)=split(' ',$pvLine,5);
+          if($part==1 && $itm2 eq "Physical" && $itm3 eq "extents")
+          {
+            $part=2;
+            print "\n   Logical Volume           PE          LE\n";
+            next;
+          }
+          if($part==2)  # the lv per PE area
+          {
+            if($itm1 eq "PE") {next;}; # skip caption line
+            if($itm2 eq "free") { $rest=$itm3; $itm3=$itm2;} # no lv on free PE
+            if($lvName eq "") # if name blank must be first time.
+            {
+              $lvName=$itm3; # set the name
+              $stPE=$itm1;   # set the start PE
+              $stLE=$rest;   # set the start LE
+              $ltLE=$stLE;   # set the last LE
+              $ltPE=$stPE;   # set the last PE
+            }
+
+            # if the name changed or the LE are out of sequence the print
+            if(($lvName ne $itm3) || ($ltLE+1 != $rest) && ($ltLE+4 != $rest) && ($ltLE != $rest))
+            {
+              printf "   %-24s %s-%s   %s-%s\n",$lvName,$stPE,$ltPE,$stLE,$ltLE;
+              $lvName=$itm3; # remember the new name
+              $stPE=$itm1;   # remember the new start PE
+              $stLE=$rest;   # remember the new start LE
+            }
+            $ltPE=$itm1;     # remember the last PE
+            $ltLE=$rest;     # remember the last LE
+          }
+        }
+        $pvName="";
+      }
+      print $vgLine;
+    }
+
+    if ( $rev ne "09" ) # HP-UX 10. only - print unsed disks
+    {
+      print "  *** Unused Physical Volumes ***\n";
+      print "  PV Name                  HW Path\n";
+      foreach $key (sort(keys %hwPathList))
+      {
+        if($hwPathList{$key} ne "")
+        {
+          printf "  %-24s %-24s\n",$key,$hwPathList{$key};
+        }
+      }
+      print "\n";
+    }
+    print "\n";
+  }
+  &EndBanner("LVM Layout");
+}
+
+
+#---------------------------------------------------------------------------#
+#	Get network information                                             #
+#---------------------------------------------------------------------------#
+sub GetNetwork
+{
+  &StartBanner("Network Configuration");
+
+  if( $platform ne "AIX" ) 
+  {
+    if( $platform eq "HP" ) 
+    { $INPUT="/usr/sbin/lanscan |"; }
+    if( $platform eq "NCR" ) 
+    { $INPUT="/etc/ildconfig |"; }
+    open INPUT or print "Unable to execute $INPUT\n";
+    while (<INPUT>)
+    {
+      if( $platform eq "HP" ) { 
+        if ($rev eq "11") {
+        ($path,$add,$rest,$up,$lan,$rest,$rest,$type,$rest)=split(" ",$_,9); 
+        } else {
+        ($path,$add,$rest,$rest,$lan,$up,$rest,$type,$rest)=split(" ",$_,9); 
+        }
+      }
+      if( $platform eq "NCR" ) 
+      { 
+        ($path,$lan,$up,$junk,$type,$junk,$junk,$junk,$junk,$junk,$junk,$rest,$add)=split(" ",$_,13);
+        if ($add eq "") { $add=$rest; }
+      }
+      next if($path eq "Hardware" || $path eq "Path" || $path eq "SLOT" );
+      if( $platform eq "HP" )  { $network{$lan}.="$type $up $add $path"; }
+      if( $platform eq "NCR" ) { $network{"en$lan"}.="$type $up $add $path"; }
+    }
+  }
+  $INPUT="/usr/bin/netstat -rn |";
+  open INPUT or print "Unable to execute netstat -rn\n";
+  while (<INPUT>)
+  {
+    if( ($platform eq "HP")  || ($platform eq "AIX")) 
+    { ($dest,$gate,$flg,$junk,$rest,$lan,$stuff)=split(" ",$_,7); }
+    next if (($platform ne "NCR") && ($lan eq "lo0")); 
+    if( $platform eq "NCR" ) 
+    { ($dest,$gate,$flg,$junk,$rest,$lan)=split(" ",$_,6); chop($lan); }
+
+    if (($lan!~/lan/) && ($platform eq "HP")) { $lan=$rest; }
+    # remember the default gateway
+    if($dest eq "default") { $default="$lan $dest $gate"; } 
+
+    # get ip address of this server for list lan
+    next if(($flg ne "U") && ($flg ne "UC"));
+    if($platform eq "HP")
+    {
+      ($junk,$junk,$rest,$junk)=split(/\./,$gate);
+      ($junk,$junk,$stuff,$junk)=split(/\./,$dest);
+    }
+    $link=$network{$lan};
+    $network{$lan}="$link $dest $gate"
+  }
+
+  print "   Lan   Type    Stat Path    Gateway          Destination      Mac Address\n";
+  foreach $lan (keys(%network))
+  {
+    ($type,$up,$add,$path,$dest,$gate)=split(" ",$network{$lan},6);
+    printf "   %-5s %-7s %-4s %-8s %-16s %-16s %s\n",$lan,$type,$up,$path,          $gate, $dest,$add;
+  }
+  # remember the default ga teway
+  ($lan,$dest,$gate)=split(" ",$default,3);           
+  print "The default gateway is $gate on interface $lan\n\n";
+  &EndBanner("Network Information");
+}
+
+
+#---------------------------------------------------------------------------#
+#	Get several /etc files                                              #
+#---------------------------------------------------------------------------#
+
+sub GetEtc {
+  &StartBanner("Mounted File System Information");
+
+  #-------------------------------- HP  ------------------------------------#
+  if( $platform eq "HP" ) {
+    open(FSINFO,"/usr/bin/bdf |") or print "Can't run bdf. $!\n";
+    while (<FSINFO>) { print; }
+    close FSINFO;
+  }
+
+  #-------------------------------- NCR ------------------------------------#
+  else {
+    open(FSINFO,"/usr/bin/df -k |") or print "Can't run df -k.  $!\n";
+    while (<FSINFO>) { print; }
+    close(FSINFO);
+  }
+  &EndBanner("Mounted File System Information");
+
+  #-------------------------------- BOTH -----------------------------------#
+
+  &StartBanner("Checklist File");
+  if( $platform eq "HP" ) { open(CHECKLIST,"/etc/fstab") or print "Can't open /etc/fstab. $!\n"; }
+  if( $platform eq "NCR" ) { open(CHECKLIST,"/etc/vfstab") or print "Can't open /etc/vfstab. $!\n";}
+  while (<CHECKLIST>) { print; }
+  close CHECKLIST; print "\n\n";
+  &EndBanner("Checklist File");
+
+  &StartBanner("Passwd File");
+  open(PASSWD,"/etc/passwd") or print "Can't open /etc/passwd. $!\n";
+  while (<PASSWD>) { 
+    ($user, $pwd, $rest) = split(':', $_, 3); 
+    print "$user:*:$rest"; 
+  }
+  close PASSWD;
+  print "\n\n";
+  &EndBanner("Passwd File");
+  
+  &StartBanner("Group File");
+  open(GROUP,"/etc/group") or print "Can't open /etc/group. $!\n";
+  while (<GROUP>) { 
+    ($group, $pwd, $rest) = split(':', $_, 3);
+    print"$group:*:$rest";
+  }
+  close GROUP;
+  print "\n\n";
+  &EndBanner("Group File");
+
+  &StartBanner("Hosts File");
+  open(HOSTS,"/etc/hosts") or print "Can't open /etc/hosts. $!\n";
+  while (<HOSTS>) {
+    $hosts{$name} .= $ip;
+    print "  " .$_;
+  }
+  close HOSTS;
+  print "\n\n";
+  &EndBanner("Hosts File");
+
+  &StartBanner("Inittab File");
+  open(INITTAB,"/etc/inittab") or print "Can't open /etc/inittab. $!\n";
+  while (<INITTAB>) { print; }
+  close INITTAB;
+  print "\n\n";
+  &EndBanner("Inittab File");
+
+  &StartBanner("Crontab File");
+  open(INITTAB,"/usr/spool/cron/crontabs/root") or print "Can't open /usr/spool/cron/crontabs/root. $!\n";
+  while (<INITTAB>) { print; }
+  close INITTAB;
+  print "\n\n";
+  &EndBanner("Crontab File");
+
+  &StartBanner("cron.allow File");
+  $INPUT="/usr/lib/cron/cron.allow";
+  open(INITTAB,$INPUT);
+  while (<INITTAB>) { print; }
+  close INITTAB;
+  print "\n\n";
+  &EndBanner("Crontab File");
+
+  &StartBanner("Other File");
+  open(INITTAB,"/usr/adm/goldbook/other") or print "Can't open /usr/adm/goldbook/other. $!\n";
+  while (<INITTAB>) { print; }
+  close INITTAB;
+  print "\n\n";
+  &EndBanner("Other File");
+
+  &StartBanner("Contacts File");
+  open(INITTAB,"/usr/adm/goldbook/contacts") or print "Can't open /usr/adm/goldbook/contacts. $!\n";
+  while (<INITTAB>) { print; }
+  close INITTAB;
+  print "\n\n";
+  &EndBanner("Contacts File");
+
+  $INPUT="/etc/resolv.conf";
+  &StartBanner("$INPUT File");
+  open(INITTAB,$INPUT) or print "Can't open $INPUT. $!\n";
+  while (<INITTAB>) { print; }
+  close INITTAB;
+  print "\n\n";
+  &EndBanner("$INPUT File");
+
+  $INPUT="/etc/nsswitch.conf";
+  &StartBanner("$INPUT File");
+  open(INITTAB,$INPUT) or print "Can't open $INPUT. $!\n";
+  while (<INITTAB>) { print; }
+  close INITTAB;
+  print "\n\n";
+
+  if( $platform eq "HP" ) {
+    $INPUT="/etc/privgroup";
+    &StartBanner("$INPUT File");
+    open(INITTAB,$INPUT) or print "Can't open $INPUT. $!\n";
+    while (<INITTAB>) { print; }
+    close INITTAB;
+
+    $INPUT="/etc/services";
+    &StartBanner("$INPUT File");
+    open(INITTAB,$INPUT) or print "Can't open $INPUT. $!\n";
+    while (<INITTAB>) { print; }
+    close INITTAB;
+
+    $INPUT="/etc/inetd.conf";
+    &StartBanner("$INPUT File");
+    open(INITTAB,$INPUT) or print "Can't open $INPUT. $!\n";
+    while (<INITTAB>) { print; }
+    close INITTAB;
+
+    $INPUT="/.rhosts";
+    &StartBanner("$INPUT File");
+    open(INITTAB,$INPUT) or print "Can't open $INPUT. $!\n";
+    while (<INITTAB>) { print; }
+    close INITTAB;
+
+  }
+}
+
+
+#---------------------------------------------------------------------------#
+#	Get Printer Info.                                                   #
+#---------------------------------------------------------------------------#
+sub GetPrinters {
+  &StartBanner("Status of Printers on System");
+
+  #-------------------------------- HP  ------------------------------------#
+  if( $platform eq "HP" ) 
+  {
+    $INPUT="lpstat -r |"; # Get print spooler status
+    open INPUT or print "Unable to execute lpstat. \n";
+    while (<INPUT>) { print "The ".$_; }
+
+    $INPUT="lpstat -d |"; # Get default printer
+    open INPUT or print "Unable to execute lpstat. \n";
+    while (<INPUT>) { print $_; }
+
+    $INPUT="lpstat -a |"; # Get list of printers
+    open INPUT or print "Unable to execute lpstat. \n";
+    while (<INPUT>)
+    {
+      ($printer,$rest)=split(" ",$_,2);
+      chop($rest);
+      print "   ".$printer." ".$rest."\n";;
+      $INDEX="lpstat -v |"; # Get list of printers
+      open INDEX or print "Unable to execute lpstat. \n";
+      $dev="";
+      while (<INDEX>)
+      {
+        if($dev eq "***")  # printer remote printer infomation
+        {
+          ($dev,$rest)=split(" ",$_,2);
+          if ($dev eq "remote")
+          {
+            print " ".$_;
+            $dev="";
+            next;
+          }
+          else
+          {
+            print "     on ** UNKNOWN **\n";
+            $dev="";
+          }
+        }
+        ($rest,$dev)=split(":",$_,2);
+        ($rest,$rest,$junk)=split(" ",$rest,3);
+        if($printer eq $junk)
+        {
+          chop($dev);
+          if($dev eq " /dev/null")  # look for remote or IP printer
+          {
+            $NSL="nslookup ".$printer." 2>&1 |"; # Get list of printers
+            open NSL or print "Unable to execute nslookup. \n";
+            while (<NSL>)
+            {
+              ($title,$adder)=split(" ",$_,2);
+
+              # remember address
+              if( $title eq "Address:") { $dev=" IP ".$adder; }
+
+              # remote printer don't print dev
+              if( $title eq "***") { $dev="*** "; }  
+            }
+            chop($dev);
+          }
+          if($dev ne "***") { print "     on$dev\n"};
+        }
+      }
+      if($dev eq "***")  # catch that last possible unknown printer type
+      {
+        print "     on ** UNKNOWN **\n";
+        $dev="";
+      }
+    }
+    print "\n";
+  }
+
+  #-------------------------------- NCR ------------------------------------#
+  if( $platform eq "NCR" ) 
+  {
+    open(STATUS,"lpstat -r |") or print "Can't run lpstat -r. $!\n";
+    while (<STATUS>) {
+      ($junk, $junk, $status) = split(' ', $_, 3); 
+      print "SCHEDULER:\t\tThe ", $status;
+    }
+    print "\n";
+    close STATUS;
+
+    open(DEFAULT,"lpstat -d |") or print "Can't run lpstat -d. $!\n";
+    while (<DEFAULT>) {
+      ($junk, $junk, $default) = split(' ', $_, 3); 
+      print "DEFAULT PRINTER:\t", $default;
+    }
+    print "\n";
+    close DEFAULT;
+
+    print "PRINTER LIST:\n";
+    open(LIST,"lpstat -a |") or print "Can't run lpstat -a. $!\n";
+    while (<LIST>) {
+      ($junk, $junk, $list) = split(' ', $_, 3);
+      print $list;
+    }
+    print "\n";
+    close LIST;
+  
+    open(IP,"lpstat -v |") or print "Can't run lpstat -v. $!\n";
+    print "PRINTER IP ADDRESSES:\n";
+    while (<IP>) {
+      ($junk, $junk, $ip) = split(' ', $_, 3);
+      print $ip;
+    }
+    print "\n";
+    close IP;
+  }
+  if( $platform eq "AIX" ) 
+  {
+  }
+
+  &EndBanner("Printer Information");
+}
+
+
+#---------------------------------------------------------------------------#
+#	Get Backup Configuration Parameters.                                #
+#---------------------------------------------------------------------------#
+sub GetBackup 
+{
+  &StartBanner("Latest Backup Configuration"); 
+  if( $platform eq "HP" ) 
+  {
+    $INPUT="/usr/bin/what /opt/reel/bin/reelb 2>&1 | grep port\.rb |";
+    open INPUT;
+    while ($line=<INPUT>) 
+    { 
+      ($rest,$junk)=split(" ",$line,2);
+      ($junk,$junk,$rest)=split(/\./,$rest,3);
+      print "     /opt/reel/bin/reelb : ReelBackup NetMaster/Client	: ".$rest."\n";
+    }
+    $INPUT="/usr/bin/what /opt/reel/bin/reel 2>&1  | grep port\.rl |";
+    open INPUT;
+    while ($line=<INPUT>) 
+    { 
+      ($rest,$junk)=split(" ",$line,2);
+      ($junk,$junk,$rest)=split(/\./,$rest,3);
+      print "     /opt/reel/bin/reel : ReelBackup Librarian		: ".$rest."\n";
+    }
+###  DBBRZ
+    $INPUT="/etc/schhbenv";
+    open INPUT;
+    while ($line=<INPUT>) 
+    { 
+      next if ($line!~/SOURCE/);
+      next if ($line=~/export/);
+      ($junk,$path)=split("=",$line);
+      chomp($path);
+    }
+    $INPUT="$path/dbbrz_version |";
+    open INPUT;
+    while ($line=<INPUT>) 
+    { 
+      ($word,$num)=split(':',$line);
+      $num=~s/\s+$//;
+      print "     $path : SCH dbbrz $word	:".$num."\n";
+    }
+
+### SQL Back track
+    $path="/home/dba";
+    $INPUT="/etc/passwd";
+    open INPUT;
+    while ($line=<INPUT>)
+    { 
+      next if ($line!~/^dba\:/);
+      ($junk,$junk,$junk,$junk,$junk,$path,$junk)=split("\:",$line);
+    }
+    $INPUT="$path/local_profile";
+    $path="";
+    open INPUT;
+    while ($line=<INPUT>)
+    {
+      next if ($line!~/SBACKTRACK_HOME/);
+      next if ($line=~/export/);
+      next if ($line=~/cd/);
+      ($path,$junk)=split(";",$line);
+      ($junk,$path)=split("=",$path);
+      chomp($path);
+    }
+
+    $INPUT="$path/bin/sbacktrack -version |";
+    open INPUT;
+    while ($line=<INPUT>)
+    {
+      next if ($line!~/sbacktrack/);
+      ($junk,$num,$junk,$junk)=split("\,",$line,4);
+      print "     $path : SQL Backtrack:".$num."\n";
+    }
+
+### OBSI 
+    $INPUT="$path/links/obsi.reelobsi/bin/obsi/reelobsi -version |";
+    open INPUT;
+    while ($line=<INPUT>)
+    {
+      ($rest,$junk)=split(/\(l/,$line);
+      ($junk,$junk,$rest)=split(":",$rest);
+      print "     $path : OBSI	:".$rest."\n";
+    }
+
+####  robots
+    $INPUT="/opt/reel/bin/schrobotd -version 2>&1|";
+    open INPUT;
+    $found=0; $num="6.0.1???";
+    while ($line=<INPUT>) 
+    { 
+      if ($line=~/ERROR\:/){$found=1;};
+      next if ($line!~/Version/);
+      ($junk,$num)=split(" ",$line);
+      $num=~s/\s+$//;
+    }
+    if ($found==1)
+    {
+      print "     /opt/reel/bin/schrobotd : robot master 		: $num\n";
+    }
+    $INPUT="/opt/reel/bin/rschrobotd -version 2>&1|";
+    open INPUT;
+    $found=0; $num="6.0.1???";
+    while ($line=<INPUT>) 
+    { 
+      if ($line=~/ERROR\:/){$found=1;};
+      next if ($line!~/Version/);
+      ($junk,$num)=split(" ",$line);
+      $num=~s/\s+$//;
+    }
+    if ($found==1)
+    {
+      print "     /opt/reel/bin/rschrobotd : robot node	 	: $num\n";
+    }
+    $INPUT="/opt/reel/bin/rrobotd -version 2>&1|";
+    open INPUT;
+    $found=0; $num="6.0.1???";
+    while ($line=<INPUT>) 
+    { 
+      if ($line=~/ERROR\:/){$found=1;};
+      next if ($line!~/Version/);
+      ($junk,$num)=split(" ",$line);
+      $num=~s/\s+$//;
+    }
+    if ($found==1)
+    {
+      print "     /opt/reel/bin/rrobotd : robot node	 	: $num\n";
+    }
+  }
+  print "\n";
+  &EndBanner("Latest Backup Configuration");
+}
+
+#---------------------------------------------------------------------------#
+#	Get EMC Configuration Parameters.                                   #
+#---------------------------------------------------------------------------#
+sub GetEMC 
+{
+  $EMCfound=0;
+
+  &StartBanner("Latest EMC Configuration"); 
+  if( $platform eq "HP" ) {
+    $INPUT="/usr/sbin/ioscan -fn |";
+  } 
+  open INPUT or print "Can't run $INPUT.  $!\n";
+  while(<INPUT>) {
+    if ($_=~/SYMM/) {
+      $EMCfound=1;
+    }
+  }
+  if ($EMCfound) {
+    if (-d "/usr/symcli") {
+      &StartBanner("EMC Solutions Enabler information"); 
+      $INPUT="/usr/symcli/bin/symcli |"; 
+      open INPUT or print "Can't run $INPUT.  $!\n";
+      while(<INPUT>) { print $_ }
+      &EndBanner("EMC Solutions Enabler information"); 
+      &StartBanner("EMC Towers Attached to this server"); 
+      $INPUT="/usr/symcli/bin/symcfg -v list |";
+      open INPUT or print "Can't run $INPUT.  $!\n";
+      while(<INPUT>) { print $_ }
+      &EndBanner("EMC Towers Attached to this server"); 
+      &StartBanner("EMC Devices"); 
+      $INPUT="/usr/symcli/bin/symdev -v list |";
+      open INPUT or print "Can't run $INPUT.  $!\n";
+      while(<INPUT>) { print $_ }
+      &EndBanner("EMC Devices"); 
+    } else {
+      print " EMC Solutions Enabler software not found at /usr/symcli \n";
+    }
+  } else {
+    print "     No EMC Devices found.\n";
+  }
+  print "\n";
+  &EndBanner("Latest EMC Configuration");
+}
+
+
+#---------------------------------------------------------------------------#
+#	Get Kernel Tuneable Parameters.                                     #
+#---------------------------------------------------------------------------#
+sub GetKernel {
+  &StartBanner("Latest Kernel"); 
+
+  #-------------------------------- HP  ------------------------------------#
+  if( $platform eq "HP" ) {
+    if ( $rev eq "09" ) {
+      print "/etc/conf/S800/config.h\n";
+      $INPUT="/etc/conf/S800/config.h";
+      open INPUT or print "Unable to open /etc/conf/S800/config.h. \n";
+      while (<INPUT>) { print "  ".$_; }
+      print "\n";
+
+      print "/etc/conf/S800/conf.c\n";
+      $INPUT="/etc/conf/S800/conf.c";
+      open INPUT or print "Unable to open /etc/conf/S800/conf.c. \n";
+    } elsif ($rev eq "10") {
+      print "\n/stand/system\n";
+      $INPUT="/stand/system";
+      open INPUT or print "Unable to open $INPUT \n";
+    } elsif ($rev eq "11") {
+      print "\nKernel Paramaters\n";
+      $INPUT="/usr/sbin/kmtune -l | ";
+      open INPUT or print "Unable to open $INPUT \n";
+      
+    }
+    while (<INPUT>) { print "  ".$_; }
+    print "\n";
+  }
+
+  #-------------------------------- NCR ------------------------------------#
+  if( $platform eq "NCR" ) {
+    open(MTUNE,"/etc/conf/cf.d/mtune") or print "Can't open mtune file.  $!\n"; 
+    print "---------------------------------------------------------\n";
+    print "------------------  /etc/conf/cf.d/mtune  ---------------\n";
+    print "---------------------------------------------------------\n";
+    while (<MTUNE>) { print; }
+    print "\n\n";
+    close MTUNE;
+
+    open(STUNE,"/etc/conf/cf.d/stune") or print "Can't open stune file.  $!\n"; 
+    print "---------------------------------------------------------\n";
+    print "------------------  /etc/conf/cf.d/stune  ---------------\n";
+    print "---------------------------------------------------------\n";
+    while (<STUNE>) { print; }
+    close STUNE;
+  }
+  if( $platform eq "AIX" ) 
+  {
+  }
+  &EndBanner("Latest Kernel Tuneable Parameters");
+}
+
+
+#---------------------------------------------------------------------------#
+#	Help Program                                                        #
+#---------------------------------------------------------------------------#
+sub HelpMe
+{
+  &TitleBanner("Goldbook Instructions");
+
+  print "\nUSAGE:\n";
+  print "goldbook [hardware] [kernel] [lvm] [network] [codewords]\n";
+  print "         [products] [patches] [files] [printers] [backup]\n\n";
+  print "         [emc] \n\n";
+  print "-- Running goldbook with no options will print entire report --\n\n";
+  print "Option         Description\n";
+  print "----------------------------------------------------------------\n";
+  print "hardware       ioscan -fn \n";
+  print "kernel         Get kernel configuration files\n";
+  print "lvm            Get LVM information for server (HP ONLY)\n";
+  print "network        Get network configuration\n";
+  print "codewords      Get list of code words on system (HP ONLY)\n";
+  print "products       Get list of products on system\n";
+  print "patches        Get list of patches applied to server\n";
+  print "files          Print /etc file like hosts and passwd\n";
+  print "printers       Get list of printers\n";
+  print "backup		Get backup configuration information\n";
+  print "emc		Get emc configuration information\n";
+  print "\n";
+  print "The order and number of options does not matter.\n\n\n";
+}
+
+
+#---------------------------------------------------------------------------#
+#	Main Program                                                        #
+#---------------------------------------------------------------------------#
+$|=1;         # just print it don't buffer output.
+@opts=("hardware","kernel","lvm","network","codewords","products","patches","files","printers","backup","emc");
+if ($#ARGV <0)
+{
+  @ARGV=@opts;
+  $#ARGV=scalar(@ARGV)-1;
+}
+else
+{
+  $itemCount=0;
+  while($itemCount<=$#ARGV)
+  {
+    @ARGV[$itemCount]=~tr/A-Z/a-z/;
+    $found=0;
+    foreach $item (@opts)
+    {
+      if(@ARGV[$itemCount] eq $item) {$found=1; last;}
+    }
+    if ($found==0) { HelpMe; exit;}
+    $itemCount++;
+  }
+}
+
+# Get platform info (HP or NCR)
+CheckPlatform;
+
+#Get Special information from the /usr/adm/other file
+GetOther;
+
+# get the system information
+GetSystem; 
+
+# Print the title of the report
+MakeTitle;    
+
+$itemCount=0;
+while($itemCount<=($#ARGV))
+{
+  if((@ARGV[$itemCount]) eq "hardware") {GetHW;}       # get the system hardware
+  if((@ARGV[$itemCount]) eq "kernel") {GetKernel;}   # get the kernel parameters
+  if((@ARGV[$itemCount]) eq "lvm") {GetLVM;}      # get the logical Voulume information
+  if((@ARGV[$itemCount]) eq "network") {GetNetwork;}  # Get the network configuration 
+  if((@ARGV[$itemCount]) eq "codewords") {GetCodewords;}# Get the codewords on this system
+  if((@ARGV[$itemCount]) eq "products") {GetProducts;} # Get the products installed
+  if((@ARGV[$itemCount]) eq "patches") {GetPatches;}  # Get the patch history
+  if((@ARGV[$itemCount]) eq "files") {GetEtc;}      # get certain /etc files
+  if((@ARGV[$itemCount]) eq "printers") {GetPrinters;} # Get list of printers and their config
+  if((@ARGV[$itemCount]) eq "backup") {GetBackup;} # Get list of printers and their config
+  if((@ARGV[$itemCount]) eq "emc") {GetEMC;} # Get list of printers and their config
+  $itemCount++;
+}

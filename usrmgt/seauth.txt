@@ -1,0 +1,4 @@
+/usr/seos/bin/selang -c "auth surrogate user.root uid(secopr) via(pgm(/allstate/scripts/ds_suusrmgt))"
+/usr/seos/bin/selang -c "auth surrogate group.root uid(secopr) via(pgm(/allstate/scripts/ds_suusrmgt))"
+/usr/seos/bin/selang -c "auth surrogate user.root uid(secadm) via(pgm(/allstate/scripts/ds_suusrmgt))"
+/usr/seos/bin/selang -c "auth surrogate group.root uid(secadm) via(pgm(/allstate/scripts/ds_suusrmgt))"

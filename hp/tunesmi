@@ -1,0 +1,90 @@
+#!/bin/sh
+#
+# Use the HP scripting toolkit utility, conrep, to reset the serial
+# number of an HP device.  Useful when an HP tech has replaced a system
+# board, but neglected to update the serial number
+#
+
+CONREP=/opt/hp/conrep/conrep
+DMIUTIL=/opt/hp/conrep/dmiutil
+SRCXML=/opt/hp/conrep/conrep.xml
+SMI_OFF=/opt/hp/conrep/smi_disable.dat
+SMI_ON=/opt/hp/conrep/smi_ensable.dat
+
+[ -f ${CONREP} ] || exit 1
+[ -f ${SRCXML} ] || exit 1
+
+# Make BIOS changes and report them, if the setting changed
+adjust() {
+        PRE=`$DMIUTIL --get $1 2>/dev/null|cut -d: -f2|sed -e 's/ *//g'`
+	if [ $PRE = $2 ]; then return; fi
+        $DMIUTIL --set $1=$2 2>/dev/null
+        POST=`$DMIUTIL --get $1 2>/dev/null|cut -d: -f2|sed -e 's/ *//g'`
+        if [ "$PRE" != "$POST" ]; then
+                echo "$1"
+		echo "        Changing from: $PRE"
+                echo "                   to: $POST"
+        fi
+}
+
+case $1 in
+    enable*)
+	adjust AMD_Minimum_Processor_Idle_Power_State C1E_State
+	adjust AMD_Ultra_Low_Power_Mode Enabled
+	adjust HP_Power_Profile Custom
+	adjust HP_Power_Regulator HP_Dynamic_Power_Savings_Mode
+	adjust Intel_Minimum_Processor_Idle_Power_State C6_State
+	adjust Intel_QPI_Link_Power_Management Enabled
+	adjust Low_Power_Halt_state Enabled
+	adjust Memory_Speed_with_2_DIMMs_per_Channel 1333MHz_Maximum
+
+        $CONREP -l -f${SMI_ON} -x${SRCXML} > /dev/null 2>&1
+	echo
+	echo "SMIs enabled.  BIOS has been set to default settings."
+	echo "You must reboot for these changes to take effect."
+        ;;
+
+    disable*)
+	adjust AMD_Minimum_Processor_Idle_Power_State No_C-States
+	adjust AMD_Ultra_Low_Power_Mode Disabled
+	adjust HP_Power_Profile Maximum_Performance
+	adjust HP_Power_Regulator HP_Static_High_Performance_mode
+	adjust Intel_Minimum_Processor_Idle_Power_State No_C-States
+	adjust Intel_QPI_Link_Power_Management Disabled
+	adjust Intel_Processor_Turbo_Mode Disabled
+	adjust Low_Power_Halt_state Disabled
+	adjust Memory_Speed_with_2_DIMMs_per_Channel 1333MHz_Maximum
+	
+        $CONREP -l -f${SMI_OFF} -x${SRCXML} > /dev/null 2>&1
+	echo
+	echo "SMIs disabled.  BIOS is tuned for maximum performance."
+	echo "You must reboot for these changes to take effect."
+        ;;
+
+    query)
+	echo "Current Settings:"
+	echo
+	$DMIUTIL --get AMD_Minimum_Processor_Idle_Power_State
+	$DMIUTIL --get AMD_Ultra_Low_Power_Mode
+	$DMIUTIL --get HP_Power_Profile
+	$DMIUTIL --get HP_Power_Regulator
+	$DMIUTIL --get Intel_Minimum_Processor_Idle_Power_State
+	$DMIUTIL --get Intel_QPI_Link_Power_Management
+	$DMIUTIL --get Low_Power_Halt_state
+	$DMIUTIL --get Memory_Speed_with_2_DIMMs_per_Channel
+	$DMIUTIL --get Intel_Processor_Turbo_Mode
+	echo
+
+        $DMIUTIL --get HP_Power_Profile 2>&1|grep Maximum_Performance >/dev/null
+        if [ $? = 0 ]; then
+            echo "SMIs are disabled.  BIOS tuned for maximum performance."
+        else
+            echo "SMIs are enabled.  BIOS using default settings."
+        fi
+        ;;
+
+    *)
+        echo "Syntax: $0 [enable|disable|query]"
+        ;;
+esac
+

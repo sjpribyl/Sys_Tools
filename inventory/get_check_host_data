@@ -1,0 +1,32 @@
+#!/bin/bash
+
+file[0]="uschi12mon02:/root/configs/server.lst"
+file[1]="nfs1:/usr/local.is/config/machinelist.util"
+file[2]="utility-ny:/usr/local.is/config/machinelist.ny"
+file[3]="utility-chi:/usr/local.is/config/machinelist.chi"
+
+STATUS=0;
+
+ssh lxinv /bin/rm -rf /var/www/Inventory/.check_host
+if [ $? -ne 0 ]; then STATUS=1; fi
+ssh lxinv /bin/mkdir -p /var/www/Inventory/.check_host
+if [ $? -ne 0 ]; then STATUS=1; fi
+rm -rf /tmp/.check_host
+if [ $? -ne 0 ]; then STATUS=1; fi
+/bin/mkdir -p /tmp/.check_host
+if [ $? -ne 0 ]; then STATUS=1; fi
+
+
+for J in $(seq 0 $((${#file[@]} - 1)))
+do
+	scp ${file[J]} /tmp/.check_host
+	if [ $? -ne 0 ]; then STATUS=1; fi
+done 
+scp -r /tmp/.check_host lxinv:/var/www/Inventory
+if [ $? -ne 0 ]; then STATUS=1; fi
+rm -rf /tmp/.check_host
+if [ $? -ne 0 ]; then STATUS=1; fi
+
+# vim: set tabstop=4 shiftwidth=4 autoindent:
+exit $STATUS
+# vim: ts=4  sw=4 autoindent

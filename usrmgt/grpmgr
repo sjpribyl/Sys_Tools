@@ -1,0 +1,673 @@
+#!/usr/bin/perl -w
+use strict;
+#use warnings;
+#   print "YOU ARE HERE ".__FILE__.":".__LINE__."\n";
+###############################################################################
+# WISH LIST
+#  ALLOW STREAM OF COMMANDS
+#
+#  Script Name : grpmgr
+#
+#  Description : Script to set passwds directly into shadow file
+#
+#  Unit    : AIS UNIX
+#
+###############################################################################
+#
+#  Date      Programmer     Description
+#  --------  ------------   -------------------------------
+#  11/17/08  Steve Pribyl   Creation
+#  04/28/09  Steve Pribyl   2.0.0
+#							change use warning to -w for older perl support
+#                           Add -V for version
+#                           Modify -T TESTMODE code
+#                           Fix check_gid and check_uid extranious errors
+#  05/11/09  Steve Pribyl     Fixed problem with user in with same
+#                               primary secondary group
+#  05/27/09	 Steve Pribyl	-Q use rolemod instead of usermod
+#
+###############################################################################
+$|=1;
+
+use Getopt::Std;
+use File::Copy;
+use File::Spec;
+umask 0377;
+
+if($ENV{"PATH"}) {
+	$ENV{"PATH"}.=":/usr/sbin";
+} else {
+	$ENV{"PATH"}="/usr/bin:/usr/sbin";
+}
+
+my $OS=`uname`; chomp($OS);
+my $ARCH=`uname -m`; chomp($ARCH);
+my $junk; my $progname;
+($junk,$junk,$progname) = File::Spec->splitpath( $0 );
+my $prgver= "2.0.0";
+my (%opts, %groups);
+my $TESTMODE=0;
+my $ROLEMODE=0;
+
+################################
+###  CREATE LOG FILE       BEGIN
+################################
+
+sub main::open_log();
+
+my $LOGFILE;
+################################
+### LOG FILE
+################################
+sub main::write_log($) {
+    my ($message) = @_;
+    open_log if (!defined $LOGFILE);
+    print $LOGFILE $message;
+}
+
+sub main::open_log() {
+    my $uname=`/usr/bin/uname -n`;
+    chomp($uname);
+    my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime(time);
+    my $date=sprintf ".%4d%02d%02d.%02d%02d%02d", $year+1900,$mon+1,$mday,$hour,$min,$sec; my $sLogFile=">/allstate/log/".$progname.".log.$uname
+".$date; $sLogFile =~/(\S+)/;
+    $sLogFile = $1;  # extracted data is considered safe
+    open $LOGFILE,$sLogFile or die "ERROR: Can't open file: '".$sLogFile."': $!.\n";;
+
+    write_log("BEGIN $progname\n");
+    write_log("ARGUMENTS:\n");
+    foreach my $key (keys %opts) {
+        write_log("$key $opts{$key}");
+    }
+    foreach (@ARGV) {
+        write_log($_." ");
+    }
+    write_log("\n\n");
+}
+
+if($OS eq "HP-UX") {
+	print "$OS is not yet supported\n";
+	exit 1;
+}
+
+my $SEOS=0;
+my $REAL_USER=getlogin()?getlogin() : "unknown";
+my $SECURITY =0;
+
+
+my $BASE_PATH="/export/home";
+#my $BASE_PATH="/etc";
+my $BASE_FILE="${BASE_PATH}/group";
+################################
+
+my $errcode=0;
+
+sub main::check_gid($$) {
+    my ($name,$id)=@_;
+    if ($SECURITY) {
+        return 1;
+    }
+    if($name eq "security") {
+        return 0;
+    }
+    my $gid   = getgrnam($name);
+    if(!defined $gid) {
+        $gid=$id;
+    }
+    if($gid<100) {
+        return 0;
+    }
+    return 1;
+}
+
+sub main::check_uid($$) {
+    my ($name,$id)=@_;
+    if ($SECURITY) { #SECURITY group is god
+        return 1;
+    }
+    if($name eq "nobody") {
+        return 0;
+    }
+    if($name eq "noaccess") {
+        return 0;
+    }
+
+    my ($junk,$gid,$uid,$shell);
+    ($junk,$junk,$uid,$gid,$junk,$junk,$junk,$junk,$shell,$junk)= getpwnam($name);
+    if(defined $uid) {
+        if($shell eq "/bin/false") { # Can't change disabled uses
+            return 0;
+        }
+        #Can't change users in security group
+        my ($sgroup, $spwd, $sgid, $members)=getgrnam("security");
+        if($sgid == $gid) {
+            return 0;
+        }
+        chomp($members);
+        foreach (split(" ",$members)) {
+            if($name eq $_) {
+                return 0;
+            }
+        }
+    } else {
+        $uid=$id;
+    }
+    if($uid<100) {
+        return 0;
+    }
+    return 1;
+}
+
+sub main::command_error($$) {
+    my ($cmd,$err)= @_;
+    print STDERR "ERROR : Command ERROR\n";
+    write_log("ERROR : Command ERROR\n");
+    print STDERR "COMMAND:\n";
+    write_log("COMMAND:\n");
+    print STDERR "\"$cmd\"\n";
+    write_log("\"$cmd\"\n");
+    print STDERR "EXIT CODE:$err\n";
+    write_log("EXIT CODE:$err\n");
+    $errcode++;
+}
+
+##
+## Run command return 0 on success and exit code on failure
+##
+sub main::run_command($) {
+    my ($cmd)= @_;
+
+	if($TESTMODE) {
+		print "TEST $cmd\n";
+		write_log("$REAL_USER usrmgr - *$cmd\n");
+		return 0;
+	} else {
+		write_log("$REAL_USER usrmgr - $cmd\n");
+		print "$cmd\n";
+		return system("$cmd");	
+	}
+}
+
+
+sub main::get_groups($) {
+	my ($USER)=@_;
+	my @groups;
+	while(my ($sgroup,$spwd,$sgid,$members)=getgrent) {
+		foreach (split(" ",$members)) {
+			if($USER eq $_) {
+				push(@groups,$sgroup);
+			}
+		}
+	}
+	return @groups;
+}
+
+sub main::help(){
+	main::VERSION_MESSAGE();
+	print "Usage:\n";
+	print "  $progname -h [-a] [-S] [-g] [-G] [-r]\n";
+	print "    This help page\n";
+	print "    -a Add help page\n";
+	print "    -g Add user to group help page\n";
+	print "    -G Remove user from group help page\n";
+	print "    -S Show help page\n";
+	print "    -r remove help page\n";
+	print "  $progname -a (-g <GID> <GROUP> | -f <FILE>)\n";
+	print "    Add group(s)\n";
+	print "  $progname -S (<GROUP> | -f <FILE>)\n";
+	print "    Show group(s)\n";
+	print "  $progname -r (<GROUP> | -f <FILE>)\n";
+	print "    remove group(s)\n";
+	print "  $progname -u (<USER> <GROUP>| -f <FILE>)\n";
+	print "    add user to group(s)\n";
+	print "  $progname -U (<USER> <GROUP>| -f <FILE>)\n";
+	print "    remove user from group(s)\n";
+	print "  A file path can be a file on the local box or a remote box in the form of <HOST>@<FILE>.\n ";
+	print "    The current user must be able access the file via ssh.\n";
+	print "-O <operator uid>\n";
+	write_log("END $progname\n");
+	exit 0;
+}
+
+sub main::VERSION_MESSAGE() {
+	print "$progname Version:$prgver\n"
+}
+
+sub main::cryptPWD($) {
+	my ($pw)= @_;
+	my $pwd=crypt($pw,join("", (".", "/", 0..9, "A".."Z", "a".."z")[rand 64,rand 64]));
+	return $pwd;
+}
+
+print "$progname Version 2.0.0\n";
+for(my $i=0;$i<=$#ARGV;$i++)  {
+    if ($ARGV[$i] eq "-T") {
+        $TESTMODE=1;
+    } 
+    if ($ARGV[$i] eq "-V") {
+        exit 0;
+    }
+    if ($ARGV[$i] eq "-Q") {
+        $ROLEMODE=$i;
+    }
+}
+if($ROLEMODE) {
+    delete $ARGV[$ROLEMODE]; #THE PARSER WAS NOTE DESIGNED FOR ROLES
+}
+
+if(!getopts('TtharSuUO:g:f:',\%opts)) {
+	print STDERR "ERROR: Invalid argument or option, try $progname -h :".__LINE__."\n";
+	write_log("ERROR: Invalid argument or option, try $progname -h :".__LINE__."\n");
+	write_log("END $progname\n");
+	exit 1;
+}
+foreach my $key (keys %opts) {
+	$opts{$key} =~/(.+)/;
+	$opts{$key} = $1;  # extracted data is considered safe
+}
+
+
+if(defined $opts{"O"}) {
+	$REAL_USER=$opts{"O"};
+}
+my ($sgroup, $spwd, $sgid, $members)=getgrnam("security");
+chomp($members);
+foreach (split(" ",$members)) {
+    if($REAL_USER eq $_) {
+        $SECURITY =1;
+    }
+}
+($junk,$junk,$junk,my $gid,$junk,$junk,$junk,$junk,$junk,$junk)= getpwnam($REAL_USER);
+if(defined $gid && $sgid == $gid) {
+	$SECURITY =1;
+}
+
+if ( -d "/usr/seos") {
+		$SEOS=1;
+}
+if(defined $opts{"t"}) {
+	$SEOS=!$SEOS;
+}
+
+
+main::help() if defined $opts{h};
+
+#Sanity Check options
+if (defined $opts{"a"}) { #ADD GROUP
+	if (defined $opts{"r"} || defined $opts{"S"} || defined $opts{"u"}  || defined $opts{"U"}) {
+		print STDERR "ERROR: Invalid switch.\n";
+		write_log("ERROR: Invalid switch.\n");
+		write_log("END $progname\n");
+		exit 1;
+	}
+    if (defined $opts{"f"}) {
+        my $file=$opts{"f"};
+        my $host;
+		if ($#ARGV!=-1) {
+			print STDERR "ERROR: Invalid or missing arguments\n.";
+			write_log("ERROR: Invalid or missing arguments\n.");
+			help();
+		}
+        
+        if ( $file =~ /:/ ) {
+            ($host ,$file)=split(/:/,$file);
+            $file="/usr/bin/ssh ".$host." /usr/bin/cat ".$file." |";
+        }
+        open INPUT,$file or die "ERROR: Can't open file: '".$file."': $!.\n";
+		my (@LABELS,$gf,$found,$foundid);
+		$gf=0;$found=0;$foundid=0;
+        while (<INPUT>) {
+            my $line=$_;
+			chomp($line);
+			if(! @LABELS) {
+				@LABELS=split(/:/,$line);
+				foreach (@LABELS) {
+					if ( $_ eq "GROUP") {
+						$found=1;
+					} elsif ( $_ eq "GID") {
+						$foundid=1;
+					} else {
+						print STDERR "ERROR: Invalid Field \"$_\" \n";
+						write_log("ERROR: Invalid Field \"$_\" \n");
+						write_log("END $progname\n");
+						exit 1;
+					}
+					if(!$found) {
+						$gf++;
+					}
+				} 
+				if (!$found) {
+					print STDERR "ERROR: GROUP field not defined.\n";
+					write_log("ERROR: GROUP field not defined.\n");
+					write_log("END $progname\n");
+					exit 1;
+				}
+				if (!$found) {
+					print STDERR "ERROR: GID field not defined.\n";
+					write_log("ERROR: GID field not defined.\n");
+					write_log("END $progname\n");
+					exit 1;
+				}
+			} else {
+				my @FIELDS=split(/:/,$line),my $cnt=0;
+				foreach (@FIELDS) {
+					if	($cnt!=$gf) {
+						$groups{$FIELDS[$gf]}{$LABELS[$cnt]}=$FIELDS[$cnt];
+					}
+					$cnt++;
+				}
+			}
+        }
+        close INPUT;
+	} else {
+		if($#ARGV!=0) {
+			print STDERR "ERROR: Invalid argument or option, try $progname -h : ".__LINE__."\n";
+			write_log("ERROR: Invalid argument or option, try $progname -h : ".__LINE__."\n");
+			write_log("END $progname\n");
+			exit 1;
+		}
+		my $GROUP=$ARGV[0];
+		chomp($GROUP);
+		if (defined $opts{"g"}) {
+			$groups{$GROUP}{"GID"}=$opts{"g"};
+		} else {
+			print STDERR "ERROR: GID must be defined\n";
+			write_log("ERROR: GID must be defined\n");
+		}
+	}
+	foreach my $GROUP (keys %groups) {
+        if(defined getgrnam($GROUP)) {
+			print STDERR "ERROR: Group \"".$GROUP."\" already exists\n" ;
+			write_log("ERROR: Group \"".$GROUP."\" already exists\n" );
+			$errcode++;
+			next;
+        }
+        if(defined getgrgid($groups{$GROUP}{"GID"})) {
+			print STDERR "ERROR: Group gid \"".$groups{$GROUP}{"GID"}."\" already exists\n" ;
+			write_log("ERROR: Group gid \"".$groups{$GROUP}{"GID"}."\" already exists\n" );
+			$errcode++;
+			next;
+        }
+		if(!check_gid($GROUP,$groups{$GROUP}{"GID"})) {
+			print STDERR "ERROR: Can't add \"$GROUP\" Insufficent Privledges.\n";
+			write_log("ERROR: Can't add \"$GROUP\" Insufficent Privledges.\n");
+			$errcode++;
+			next;
+		}
+		my $command;
+		if ($OS eq "AIX") {
+			$command="/usr/bin/mkgroup id=".$groups{$GROUP}{"GID"}." $GROUP";
+		} else {
+			$command="/usr/sbin/groupadd -g ".$groups{$GROUP}{"GID"}." $GROUP";
+		}
+		if((my $err=run_command($command))) {
+                command_error($command,$err);
+		}
+	}
+} elsif (defined $opts{"S"} || defined $opts{"r"}) { #SHOW/REMOVE GROUP
+	if (defined $opts{"a"} || defined $opts{"u"} || defined $opts{"U"}) {
+		print STDERR "ERROR: Invalid switch.\n";
+		exit 1;
+	}
+
+    if (defined $opts{"f"}) {
+        my $file=$opts{"f"};
+        my $host;
+        if ($#ARGV>0) {
+            print STDERR "ERROR: Invalid argument or option, try $progname -h : ".__LINE__."\n";
+            exit 1;
+        }
+        if ( $file =~ /:/ ) {
+            ($host ,$file)=split(/:/,$file);
+            $file="/usr/bin/ssh ".$host." /usr/bin/cat ".$file." |";
+        }
+        open INPUT,$file or die "ERROR: Can't open file: '".$file."': $!.\n";
+        while (<INPUT>) {
+            my $line=$_;
+            chomp($line);
+			$groups{$line}=$line;
+        }
+        close INPUT;
+    } else {
+		if($#ARGV!=0) {
+			print STDERR "ERROR: Invalid argument or option, try $progname -h : ".__LINE__."\n";
+			exit 1;
+		}
+		$groups{$ARGV[0]}=$ARGV[0];
+	} 
+    if (keys(%groups)) {
+        foreach my $GROUP (keys %groups) {
+			if(!defined getgrnam($GROUP)) {
+				print STDERR "ERROR: Group \"".$GROUP."\" does not exists\n" ;
+				$errcode++;
+				next;
+			}
+			if(defined $opts{"r"} && !check_gid($GROUP,-1)) {
+				print STDERR "ERROR: Can't remove \"$GROUP\" Insufficent Privledges.\n";
+				$errcode++;
+				next;
+			}
+            if ($SEOS) {
+				my $command;
+				if(defined $opts{"r"}) {
+					$command= "/usr/seos/bin/selang -s -c \"rg $GROUP unix\"";
+				} else {
+					$command= "/usr/seos/bin/selang -s -c \"sg $GROUP unix\"";
+				}
+                if((my $err=run_command($command))) {
+                    command_error($command,$err);
+                }
+            } else {
+				if(defined $opts{"r"}) {
+					my $command;
+					if($OS eq "AIX") {
+						$command="/usr/sbin/rmgroup $GROUP";
+					} else {
+						$command="/usr/sbin/groupdel $GROUP";
+					}
+
+					if((my $err=run_command($command))) {
+						command_error($command,$err);
+					}
+				} else {
+					my ($group, $pwd, $gid, $members)=getgrnam($GROUP);
+					print "$group:$gid:$members\n";
+				}
+			}
+		}
+	}
+} elsif (defined $opts{"u"} || defined $opts{"U"}) { #ADD/REMOVE USER FROM GROUP
+	if (defined $opts{"a"} || defined $opts{"S"} || defined $opts{"r"} || (defined $opts{"u"} && defined $opts{"U"})) {
+		print STDERR "ERROR: Invalid switch.\n";
+		write_log("ERROR: Invalid switch.\n");
+		write_log("END $progname\n");
+		exit 1;
+	}
+    if (defined $opts{"f"}) {
+        my $file=$opts{"f"};
+        my $host;
+		if ($#ARGV!=-1) {
+			print STDERR "ERROR: Invalid or missing arguments\n.";
+			write_log("ERROR: Invalid or missing arguments\n.");
+			help();
+			exit 1;
+		}
+        
+        if ( $file =~ /:/ ) {
+            ($host ,$file)=split(/:/,$file);
+            $file="/usr/bin/ssh ".$host." /usr/bin/cat ".$file." |";
+        }
+        open INPUT,$file or die "ERROR: Can't open file: '".$file."': $!.\n";
+		my (@LABELS,$gf,$found, $foundid);
+		$gf=0;$found=0; $foundid=0;
+        while (<INPUT>) {
+            my $line=$_;
+			chomp($line);
+			if(! @LABELS) {
+				@LABELS=split(/:/,$line);
+				foreach (@LABELS) {
+					if ( $_ eq "USER") {
+						$found=1;
+					} elsif ( $_ eq "GROUP") {
+						$foundid=1;
+					} else {
+						print STDERR "ERROR: Invalid Field \"$_\" \n";
+						write_log("ERROR: Invalid Field \"$_\" \n");
+						write_log("END $progname\n");
+						exit 1;
+					}
+					if(!$found) {
+						$gf++;
+					}
+				} 
+				if (!$found) {
+					print STDERR "ERROR: USER field not defined.\n";
+					write_log("ERROR: USER field not defined.\n");
+					write_log("END $progname\n");
+					exit 1;
+				}
+				if (!$found) {
+					print STDERR "ERROR: GROUP field not defined.\n";
+					write_log("ERROR: GROUP field not defined.\n");
+					write_log("END $progname\n");
+					exit 1;
+				}
+			} else {
+				my @FIELDS=split(/:/,$line),my $cnt=0;
+				foreach (@FIELDS) {
+					if	($cnt!=$gf) {
+						$groups{$FIELDS[$gf]}{$LABELS[$cnt]}=$FIELDS[$cnt];
+					}
+					$cnt++;
+				}
+			}
+        }
+        close INPUT;
+	} else {
+		if($#ARGV!=1) {
+			print STDERR "ERROR: Invalid argument or option, try $progname -h : ".__LINE__."\n";
+			write_log("ERROR: Invalid argument or option, try $progname -h : ".__LINE__."\n");
+			write_log("END $progname\n");
+			exit 1;
+		}
+		my $USER=$ARGV[0];
+		chomp($USER);
+		my $GROUP=$ARGV[1];
+		chomp($GROUP);
+		$groups{$USER}{"GROUP"}=$GROUP;
+	}
+
+    if (keys(%groups)) {
+        foreach my $USER (keys %groups) {
+
+			my ($junk,$gid,$uid,$shell);
+			($junk,$junk,$uid,$gid,$junk,$junk,$junk,$junk,$shell,$junk)= getpwnam($USER);
+			if(!defined $uid) {
+				print STDERR "ERROR: \"$USER\" is not a valid user.\n" ;
+				write_log("ERROR: \"$USER\" is not a valid user.\n" );
+				$errcode++;
+				next;
+			}
+			if(!check_uid($USER,-1)) {
+				print STDERR "ERROR: Can't modify \"".$USER."\" Insufficent Privledges.\n";
+				write_log("ERROR: Can't modify \"".$USER."\" Insufficent Privledges.\n");
+				$errcode++;
+				next;
+			}
+			my ($ugroups, $command,$old_errcode);
+			$old_errcode=$errcode;
+			foreach(split(",",$groups{$USER}{"GROUP"})) {
+				my $new_group=$_,my $found=0;
+				if(my ($group,$pwd,$ggid,$members)=getgrnam($new_group)) {
+					foreach (split(" ",$members)) {
+						if($USER eq $_) {
+							$found=1;
+						}
+					}
+					if($found && defined $opts{"u"}) {
+						print STDERR "ERROR: \"$USER\" is already a member of \"".$group."\".\n" ;
+						write_log("ERROR: \"$USER\" is already a member of \"".$group."\".\n" );
+						$errcode++;
+						next;
+					} elsif(!$found && defined $opts{"U"}) { #MUST BE "U" for remove then
+						print STDERR "ERROR: \"$USER\" not a member of \"".$group."\".\n" ;
+						write_log("ERROR: \"$USER\" not a member of \"".$group."\".\n" );
+						$errcode++;
+						next;
+					}
+				} else {
+					print STDERR "ERROR: Group \"".$new_group."\" does not exist\n" ;
+					write_log("ERROR: Group \"".$new_group."\" does not exist\n" );
+					$errcode++;
+					next;
+				}
+				if(!check_gid($new_group,-1)) {
+					print STDERR "ERROR: Can't modify \"".$new_group."\" Insufficent Privledges.\n";
+					write_log("ERROR: Can't modify \"".$new_group."\" Insufficent Privledges.\n");
+					$errcode++;
+					next;
+				}
+            }
+			if($errcode!=$old_errcode) {
+				next;
+			}
+            if ($SEOS) {
+				foreach(split(",",$groups{$USER}{"GROUP"})) {
+					my $group=$_;
+					$command="/usr/seos/bin/selang -s -c \"";
+					if(defined $opts{"U"}) { 
+						$command.="join- $USER group(".$group.") unix\"";
+					} else {
+						$command.="join $USER group(".$group.") gowner(security) unix\"";
+					}
+				}
+			} else {
+				while(my ($group,$pwd,$ggid,$members)=getgrent) {
+					foreach (split(" ",$members)) {
+						if($USER eq $_ && $gid!=$ggid) { #if user and !primary group
+							if(defined $opts{"u"}) {
+								$ugroups.=defined $ugroups?",$group":"$group";
+							} else { #MUST BE "U" for remove then
+								my $found=0;
+								foreach(split(",",$groups{$USER}{"GROUP"})) {
+									if($_ eq $group) {
+										$found=1;
+									}
+								}
+								if(!$found) {
+									$ugroups.=defined $ugroups?",$group":"$group";
+								} 
+							} 
+						}
+					}
+				}
+				if(defined $opts{"u"}) {
+					$ugroups.="," if(defined $ugroups);
+					$ugroups.=$groups{$USER}{"GROUP"}
+				}
+				$ugroups="" if(!defined $ugroups);
+				if($ROLEMODE) {
+					$command="/usr/sbin/rolemod -R \"$ugroups\" $USER";
+				} else {
+					$command="/usr/sbin/usermod -G \"$ugroups\" $USER";
+				}		
+			}
+			if((my $err=run_command($command))) {
+				command_error($command,$err);
+			}
+		}
+	}
+} else {
+    print STDERR "ERROR: Invalid argument or option, try $progname -h : ".__LINE__."\n";
+	write_log("ERROR: Invalid argument or option, try $progname -h : ".__LINE__."\n");
+	write_log("END $progname\n");
+	exit 1;
+}
+
+if($errcode && defined $opts{"f"}) {
+	print STDERR "ERROR: Check output for ERRORS\n";
+	write_log("ERROR: Check output for ERRORS\n");
+}
+
+write_log("END $progname\n");
+exit $errcode;

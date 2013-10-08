@@ -1,0 +1,36 @@
+module udev 1.0.0;
+require {
+	class dir write;
+	class dir add_name;
+	class dir remove_name;
+	class dir search;
+	class file create;
+	class file write;
+	class file open;
+	class file read;
+	class file link;
+	class file unlink;
+	class file getattr;
+	class udp_socket name_bind;
+	class udp_socket node_bind;
+	class capability net_bind_service;
+	class capability sys_time;
+
+	type udev_t;
+	type var_lock_t;
+	type sshd_var_run_t;
+	type ntp_drift_t;
+	type ntp_port_t;
+	type node_t;
+}
+
+#============= udev_t ==============
+allow udev_t var_lock_t:dir { write add_name remove_name};
+allow udev_t var_lock_t:file { unlink link create write open read};
+allow udev_t sshd_var_run_t:file { getattr };
+allow udev_t ntp_drift_t:dir search;
+allow udev_t ntp_port_t:udp_socket name_bind;
+allow udev_t node_t:udp_socket node_bind;
+allow udev_t self:capability net_bind_service;
+allow udev_t self:capability sys_time;
+

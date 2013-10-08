@@ -1,0 +1,28 @@
+#selang -c "rr sudo admusradd"
+selang -c "er sudo adm_usrmgt data('/allstate/scripts/usrmgt') gowner(security) targuid(secadm) password-"
+selang -c "auth sudo adm_usrmgt gid(secadm) access(execute)"
+
+selang -c "er sudo adm_usradd data('/allstate/scripts/usradd') gowner(security) targuid(secadm) password-"
+selang -c "auth sudo adm_usradd gid(secadm) access(execute)"
+
+selang -c "er sudo adm_usrmod data('/allstate/scripts/usrmod') gowner(security) targuid(secadm) password-"
+selang -c "auth sudo adm_usrmod gid(secadm) access(execute)"
+
+selang -c "er sudo adm_usrpwd data('/allstate/scripts/usrpwd') gowner(security) targuid(secadm) password-"
+selang -c "auth sudo adm_usrpwd gid(secadm) access(execute)"
+
+selang -c "er sudo opr_usrpwd data('/allstate/scripts/usrpwd') gowner(security) targuid(secopr) password-"
+selang -c "auth sudo opr_usrpwd gid(secopr) access(execute)"
+
+selang -c "er sudo adm_grpadd data('/allstate/scripts/grpadd') gowner(security) targuid(secadm) password-"
+selang -c "auth sudo adm_grpadd gid(secadm) access(execute)"
+
+selang -c "er sudo adm_grpmod data('/allstate/scripts/grpmod') gowner(security) targuid(secadm) password-"
+selang -c "auth sudo adm_grpmod gid(secadm) access(execute)"
+
+selang -c "auth surrogate user._default gid(secadm) via(pgm(/opt/CAseos/bin/sesudo))"
+selang -c "auth surrogate user._default gid(secopr) via(pgm(/opt/CAseos/bin/sesudo))"
+selang -c "auth surrogate group._default gid(secadm) via(pgm(/opt/CAseos/bin/sesudo))"
+selang -c "auth surrogate group._default gid(secopr) via(pgm(/opt/CAseos/bin/sesudo))"
+selang -c "auth surrogate group.isds gid(secadm) via(pgm(/opt/CAseos/bin/sesudo))"
+selang -c "auth surrogate group.isds gid(secopr) via(pgm(/opt/CAseos/bin/sesudo))"

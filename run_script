@@ -1,0 +1,110 @@
+#!/bin/sh
+MAILTO=${USER}
+if [ -z ${MAILTO} ];then
+    MAILTO=${LOGNAME}
+fi
+QUIET=0
+SLEEP=0
+LONG_RUN=0
+OSTYPE=`uname`
+if [ "${OSTYPE}" = "NetBSD" ]; then
+    MKTEMP=/usr/bin/mktemp
+    EMAIL="/usr/sbin/sendmail -t"
+    EXPR=/bin/expr
+    HOSTNAME=`/bin/hostname`
+    HN=${HOSTNAME%%.*}
+    RUN_SH=/bin/ksh
+elif [ "${OSTYPE}" = "OpenBSD" ]; then
+    MKTEMP=/usr/bin/mktemp
+    EMAIL="/usr/sbin/sendmail -t"
+    EXPR=/bin/expr
+    HOSTNAME=`/bin/hostname`
+    HN=${HOSTNAME%%.*}
+    RUN_SH=/bin/ksh
+else
+    MKTEMP=/bin/mktemp
+    EMAIL="/usr/sbin/sendmail -t"
+    EXPR=/usr/bin/expr
+    HOSTNAME=`uname -n`
+    HN=${HOSTNAME%%.*}
+    RUN_SH=/bin/ksh
+fi
+
+while (( [ $# -ge 1 ] )); do
+    if [ -z "${script}" -a "${1}" = "-h" ]; then
+        /bin/echo "${0} [-hq] [-u <email address>] <description> <program>"
+        /bin/echo "Email the results of this program"
+        /bin/echo "   -h #this help"
+        /bin/echo "   -u <email address> # send to specified address"
+        /bin/echo "     default email is \${USER}"
+        /bin/echo "   -l <seconds> #send email if running more then <seconds>"
+        /bin/echo "   -q #only send on failure"
+        /bin/echo "   -r #sleep for up to 60 min based on random number seeded by hostname"
+                exit 1
+        elif [ -z "${script}" -a "${1}" = "-u" ]; then
+			shift
+			MAILTO=$1
+        elif [ -z "${script}" -a "${1}" = "-l" ]; then
+			shift
+			LONG_RUN=$1
+        elif [ -z "${script}" -a "${1}" = "-q" ]; then
+			QUIET=1
+        elif [ -z "${script}" -a "${1}" = "-r" ]; then
+			RANDOM=`hostname`
+			SLEEP=`${EXPR} $RANDOM % 59 \* 59 \+ 1`
+        elif [ -z "${name}" ]; then
+			name=${1}
+        elif [ -z "${script}" ]; then
+			script=${1}
+        else
+			args="${args} ${1}"
+        fi
+        shift
+done
+
+if [ ${SLEEP} -ne 0 ]; then
+	sleep ${SLEEP}
+fi
+
+start_date=`/bin/date +%s`
+TFILE=`${MKTEMP} -t run_script.XXXXXX`
+/bin/echo "------------Start Log------------" > ${TFILE}
+${RUN_SH} -c "${script} ${args}" >>${TFILE} 2>&1
+EXITCODE=$?
+end_date=`/bin/date +%s`
+dur=`${EXPR} ${end_date} - ${start_date}`
+hours=`${EXPR} ${dur} / 3600`
+min=`${EXPR} ${dur} % 360 / 60`
+sec=`${EXPR} ${dur} % 60`
+/bin/echo "------------End Log------------" >>${TFILE}
+/bin/echo >> ${TFILE}
+/bin/echo "Host:${HOSTNAME}" >>${TFILE}
+/bin/echo "Description:${name}" >>${TFILE}
+/bin/echo "Script:${script}" >>${TFILE}
+/bin/echo "Arguments:${args}" >>${TFILE}
+/bin/echo "email:${MAILTO}" >>${TFILE}
+/bin/echo "Status:${status}" >>${TFILE}
+if [ ${SLEEP} -gt 0 ]; then
+	/bin/echo "Sleep : ${SLEEP}"  >>${TFILE}
+fi
+/bin/echo "Duration : ${hours} hrs ${min} min ${sec} seconds"  >>${TFILE}
+/bin/echo "         : ${dur} seconds"  >>${TFILE}
+if [ ${LONG_RUN} -gt 0 ]; then
+	/bin/echo "Run Time Limit : ${LONG_RUN} seconds"  >>${TFILE}
+fi
+
+if [ ${EXITCODE} -eq 0 ]; then
+    status="Succeeded"
+else
+    status="Failed(${EXITCODE})"
+    if [ ${QUIET} ]; then QUIET=0; fi
+fi
+if [ ${LONG_RUN} -gt 0 -a ${dur} -ge ${LONG_RUN} ]; then
+    status=+"-WARNING LONG RUN"
+    if [ ${QUIET} ]; then QUIET=0; fi
+fi
+
+if [ ${QUIET} -eq 0 ]; then
+	(/bin/echo "To: ${MAILTO}" && /bin/echo "Subject: ${HN} ${name} ${status}" && /bin/echo &&  /bin/cat ${TFILE}) | ${EMAIL}
+fi
+/bin/rm ${TFILE}

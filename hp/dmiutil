@@ -1,0 +1,111 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Data::Dumper;
+use Getopt::Long;
+use Pod::Usage;
+use XML::Simple;
+
+# define options, show help if requested
+my ($help, @get, $all, $set);
+GetOptions("help|h"         => \$help,
+           "get|g=s@"       => \@get,
+           "set|s=s%"       => \$set,
+           "all|a"          => \$all,
+          );
+pod2usage(2) if $help;
+push (@get, "*") if $all;
+
+# default path to the HP smartstart scripting toolkit for Linux
+my $CONREP   = "/opt/hp/conrep/conrep";
+my $SETTINGS = "/opt/hp/conrep/conrep.xml";
+my $TMPFILE  = "/tmp/tmpload.dat.$$";
+my $CURRENT  = "/tmp/CURRENT.xml.$$";
+
+# get current BIOS settings
+system("$CONREP -x$SETTINGS -s -f$CURRENT > /dev/null");
+exit if ($? != 0 );
+
+my $xml      = new XML::Simple;
+my $possible = $xml->XMLin($SETTINGS) or die "$SETTINGS not found";
+my $current  = $xml->XMLin($CURRENT) or die $@;
+
+if (defined($get[0]) && $get[0] eq "*") {
+        my $h = $current->{'Section'};
+        foreach my $k (sort keys(%{$h})) {
+                next if !exists($h->{$k}->{'content'});
+                printf ("%-40s: ", $k);
+                printf ("%-38s\n", $h->{$k}->{'content'}) if (!$all);
+                next if (!$all);
+                my $values = $possible->{'Section'}->{$k}->{'value'};
+                foreach my $x (sort keys(%{$values})) {
+                        $values->{$x}->{'content'} .= "*" 
+                                if $h->{$k}->{'content'} eq 
+                                   $values->{$x}->{'content'};
+                        printf ("%-38s\n%-40s  ", $values->{$x}->{'content'}, "");
+                }
+                print "\n";
+        }
+        exit;
+}
+
+foreach (@get) {
+        my $h = $current->{'Section'}->{$_}->{'content'};
+	next if !defined($h);
+        printf ("%-40s: ", $_);
+        printf ("%-38s\n", $h) if (!$all);
+        next if (!$all);
+        my $values = $possible->{'Section'}->{$_}->{'value'};
+        foreach my $x (sort keys(%{$values})) {
+                $values->{$x}->{'content'} .= "*" if $h eq $values->{$x}->{'content'};
+                printf ("%-38s\n%-40s  ", $values->{$x}->{'content'}, "");
+        }
+        print "\n";
+}
+
+if ($set) {
+        open (F, ">$TMPFILE");
+        print F "<Conrep version=\"2.20\">\n";
+        foreach my $k (sort keys(%{$set})) {
+                print F "  <Section name=\"$k\">". $set->{$k} ."</Section>\n"
+        }
+        print F "</Conrep>\n";
+        close (F);
+        `$CONREP -l -f$TMPFILE -x$SETTINGS`;
+}
+
+# clean up
+END {
+    unlink $CURRENT if defined($CURRENT);
+    unlink $TMPFILE if defined($TMPFILE);
+}
+
+__END__
+=head1 dmiutil
+
+dmiutil - Utility to modify BIOS settings on HP blades
+
+=head1 SYNOPSIS
+
+  dmiutil [options]
+
+  Options:
+    --all                Show all possibilities, not just the current value
+                           current setting will have a * next to it
+    --get=<attribute>    Get current BIOS setting for <attribute>
+                           --get=* will get all current BIOS settings
+                           defaults to * if omitted and --all is used
+    --set=<attr>=<value> Set BIOS <attr> to <value>
+                           requires a reboot to take effect
+    --help               Print this menu and exit
+
+=head1 BUGS
+
+  None known
+
+=head1 AUTHORS
+
+  Geoff Silver
+
+=cut

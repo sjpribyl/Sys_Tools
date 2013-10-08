@@ -1,0 +1,69 @@
+#!/usr/bin/perl 
+#printf "YOU ARE HERE:". __LINE__."\n";
+#print Data::Dumper->Dump([%offset], [qw(%offset)]);
+use strict;
+use warnings;
+use Getopt::Std;
+use LWP::Simple;
+
+use Cwd 'abs_path';
+use File::Basename;
+use lib dirname(abs_path($0)).'/modules';
+use POSIX qw(strftime);
+use Data::Dumper;
+
+our $basedir="/var/www/Inventory";
+our $datadir="$basedir/.reports";
+my $report="$datadir/ptp_master_check";
+getstore("http://lxinv/.reports/host_db.txt","/tmp/host_db.txt");
+my $host_db=require "/tmp/host_db.txt";
+my $success=1;
+$|=1;
+
+sub print_output($) {
+	my $line=$_[0];
+	print OUTPUT $line;
+	print $line;
+}
+my %mac_index;
+my %master_index;
+foreach my $key (sort (keys %{$host_db})) {
+	next if ( $key =~ "_"); #Skip Special records
+	foreach my $nic (keys %{$host_db->{$key}->{INTERFACES}}) {
+		next if ($nic eq "lo"); # Skip home
+		next if ($nic eq "sit0"); # Skip sit 
+		$mac_index{$host_db->{$key}->{INTERFACES}->{$nic}->{ETHER}}=$key;
+	}
+}
+
+unlink ($report);
+open(OUTPUT,">", $report) or die("Unable to open $report : $!\n");
+
+foreach my $host (sort(keys %{$host_db})) {
+	my $master;
+	next if ($host =~ /^_.*/);
+	if (!defined( $mac_index{$host_db->{$host}->{PTP}->{MASTER_MAC}})) {
+		$master="unknown";
+	} else {
+		$master=$mac_index{$host_db->{$host}->{PTP}->{MASTER_MAC}}
+	}
+#	print_output "$host ".$host_db->{$host}->{PTP}->{MASTER_MAC}." ".$master."\n";
+	$master_index{$master}->{COUNT}++;
+	push(@{$master_index{$master}->{HOSTS}},$host);
+}
+
+print_output "\n\nPTP Masters\n\n";
+foreach my $master (sort(keys %master_index)) {
+	print_output "\n$master ".$master_index{$master}->{COUNT};
+	if (! grep( /ptp/, @{$host_db->{$master}->{BCFG}->{GROUPS}})) {
+		print_output " NOT PTP-MASTER!!";
+		$success=0;
+	}
+	print_output "\n";
+	foreach my $host (sort( @{$master_index{$master}->{HOSTS}})) {
+		print_output "\t$host \n";
+	}
+}
+
+exit !$success; #SHELL exit codes are oposite of perl, blarg
+# vim: ts=4  sw=4 autoindent

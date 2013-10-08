@@ -1,0 +1,1242 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+#	print "YOU ARE HERE ".__FILE__.":".__LINE__."\n";
+###############################################################################
+#WISH LIST
+#  ALLOW STREAM OF COMMANDS
+#
+#  Script Name : usrmgr
+#
+#  Description : Script to set passwds directly into shadow file
+#
+#  Unit    : AIS UNIX
+#
+###############################################################################
+#
+#  Date    Programmer         Description
+#  --------  ------------       -------------------------------
+#  11/17/2008  Steve Pribyl     Creation
+#  04/25/2009  Steve Pribyl     Remove -m from usermod command
+#								Fix check_uid extranious error message when added new users
+#  05/28/09		Steve Pribyl    Fix bug at line 135
+#
+#
+###############################################################################
+$|=1;
+#TODO itmos user add
+#TODO itmos group join
+
+use Getopt::Std;
+use File::Copy;
+use File::Spec;
+use Fcntl ':flock'; # import LOCK_* constants
+
+
+if($ENV{"PATH"}) {
+	$ENV{"PATH"}.=":/usr/sbin";
+} else {
+	$ENV{"PATH"}="/usr/bin:/usr/sbin";
+}
+
+umask 0377;
+
+
+my $OS=`uname`; chomp($OS);
+my $ARCH=`uname -m`;chomp($ARCH);
+my $junk; my $prgname;
+($junk,$junk,$prgname) = File::Spec->splitpath( $0 );
+my $prgver= "1.0.0";
+my (%opts,%users,$SEOS);
+
+if(!getopts('tThamrSpleO:u:g:G:d:R:f:c:s:Cv',\%opts)) {
+	print STDERR "ERROR: Invalid argument or option, try $prgname -h :".__LINE__."\n";
+	exit 1;
+}
+
+#Untaint vars
+foreach my $key (keys %opts) {
+	$opts{$key} =~/(.+)/;
+	$opts{$key} = $1;  # extracted data is considered safe
+}
+
+if(defined $opts{"v"}) {
+	print "$prgname: Version 1.0";
+	exit 0;
+}
+
+sub main::open_log();
+
+my $LOGFILE;
+################################
+### LOG FILE 
+################################
+sub main::write_log($) {
+	my ($message) = @_;
+	open_log if (!defined $LOGFILE);
+	print $LOGFILE $message;
+}
+
+sub main::open_log() {
+	my $uname=`/usr/bin/uname -n`;
+	chomp($uname);
+	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime(time); 
+	my $date=sprintf ".%4d%02d%02d.%02d%02d%02d", $year+1900,$mon+1,$mday,$hour,$min,$sec; my $sLogFile=">/allstate/log/".$prgname.".log.$uname".$date; $sLogFile =~/(\S+)/;
+	$sLogFile = $1;  # extracted data is considered safe
+	open $LOGFILE,$sLogFile or die "ERROR: Can't open file: '".$sLogFile."': $!.\n";;
+
+	write_log("BEGIN $prgname\n");
+	write_log("ARGUMENTS:\n");
+	foreach my $key (keys %opts) {
+		write_log("$key $opts{$key}");
+	}
+	foreach (@ARGV) {
+		write_log($_." ");
+	}
+	write_log("\n\n");
+}
+
+my $BASE_PATH;
+my $PASSWD_FILE;
+my $SEC_PASSWD_FILE;
+my $OPASSWD_FILE;
+my $LOCK_FILE;
+if($OS eq "AIX") {
+	$BASE_PATH="/etc";
+	$SEC_PASSWD_FILE="$BASE_PATH/security/passwd";
+	$PASSWD_FILE="$BASE_PATH/passwd";
+} else {
+	$BASE_PATH="/etc";
+	$LOCK_FILE="$BASE_PATH/.pwd.lock";
+	$PASSWD_FILE="$BASE_PATH/shadow";
+	$OPASSWD_FILE="$BASE_PATH/oshadow";
+	$OPASSWD_FILE =~/(\S+)/;
+	$OPASSWD_FILE = $1;  # extracted data is considered safe
+}
+$PASSWD_FILE =~/(\S+)/;
+$PASSWD_FILE = $1;  # extracted data is considered safe
+
+$SEOS=0;
+
+
+my $SECURITY =0;
+my $REAL_USER=getlogin() ? getlogin() : "unknown";
+
+################################
+
+my $errcode=0;
+
+sub main::check_uid($$) {
+	if ($SECURITY) {
+		return 1;
+	}
+	my ($name,$id)=@_;
+    my ($junk,$gid,$uid,$shell);
+    if(!(($junk,$junk,$uid,$gid,$junk,$junk,$junk,$junk,$shell,$junk)= getpwnam($name))) {
+		return 1;#USER NOT FOUND SO MUST BE OK
+	}
+    if($shell eq "/bin/false") {
+        return 0;
+    }
+
+	#Can't change users in security group
+	my ($sgroup, $spwd, $sgid, $members)=getgrnam("security");
+	if($sgid == $gid) {
+		return 0;
+	}
+	chomp($members);
+	foreach (split(" ",$members)) {
+		if($name eq $_) {
+			return 0;
+		}
+	}
+
+
+	if(!defined $uid) {
+		$uid=$id;
+	}
+	if($uid<100) {
+		return 0;
+	}
+	if($name eq "nobody") {
+		return 0;
+	}
+	if($name eq "noaccess") {
+		return 0;
+	}
+	return 1;
+}
+
+sub main::check_gid($$) {
+    if ($SECURITY) {
+        return 1;
+    }
+    my ($name,$id)=@_;
+    my $gid   = getgrnam($name);
+    if(!defined $gid) {
+        $gid=$id;
+    }
+    if($gid<100) {
+        return 0;
+    }
+    if($name eq "security") {
+        return 0;
+    }
+    return 1;
+}
+
+sub main::command_error($$) {
+	my ($cmd,$err)= @_;
+	print STDERR "ERROR : Command ERROR\n";
+	write_log("ERROR : Command ERROR\n");
+	print STDERR "COMMAND:\n";
+	write_log("COMMAND:\n");
+	print STDERR "\"$cmd\"\n";
+	write_log("\"$cmd\"\n");
+	print STDERR "EXIT CODE:$err\n";
+	write_log("EXIT CODE:$err\n");
+	$errcode++;
+}
+
+##
+## Run command return 0 on success and exit code on failure
+##
+sub main::run_command($) {
+	my ($cmd)= @_;
+	if(defined $opts{"T"}) {
+		print "TEST $cmd\n";
+		write_log("$REAL_USER usrmgr - *$cmd\n");
+		return 0;
+	} else {
+		write_log("$REAL_USER usrmgr - $cmd\n");
+		print "$cmd\n";
+		return system($cmd);
+	}
+	return 0;
+}
+
+sub main::help(){
+	#TODO detailed help
+	main::VERSION_MESSAGE();
+	print "Usage:\n";
+	if(!defined $opts{"m"} && !defined $opts{"a"} && !defined $opts{"l"} && !defined $opts{"S"} && !defined $opts{"r"} && !defined $opts{"p"}) {
+		print "  $prgname -h [-a] [-l] [-m] [-S] [-r] [-p]\n";
+		print "    This help page\n";
+		print "    -a add help page\n";
+		print "    -l lock help page\n";
+		print "    -m modify help page\n";
+		print "    -S show help page\n";
+		print "    -r remove help page\n";
+		print "    -p password help page\n";
+	}
+	if(defined $opts{"a"} ||(!defined $opts{"m"} && !defined $opts{"a"} && !defined $opts{"l"} && !defined $opts{"S"} && !defined $opts{"r"} && !defined $opts{"p"})) {
+#		print "  $prgname -a ((-u <UID> [-c <GECOS>] [-g <GROUP> ] [-G <GROUP>[,<GROUP>,...] [-d <DIR>] [-A <AUTH>[,<AUTH>,...]] [-R <ROLE>[,ROLE,...]] [-P <PROFILE>[,<PROFILE>,...] [-s <SHELL>] <USER>) | -f <FILE>)\n";
+		print "  $prgname -a ((-u <UID> [-c <GECOS>] [-g <GROUP> ] [-G <GROUP>[,<GROUP>,...] [-d <DIR>] [-R <ROLE>[,ROLE,...]] [-s <SHELL>] <USER>) | -f <FILE>)\n";
+		print "    Add user(s)\n";
+	}
+	if(defined $opts{"m"} ||(!defined $opts{"m"} && !defined $opts{"a"} && !defined $opts{"l"} && !defined $opts{"S"} && !defined $opts{"r"} && !defined $opts{"p"})) {
+#		print "  $prgname -m (([-c <GECOS>] [-g <GROUP>] [-G <GROUP>[,<GROUP>,...] [-d <DIR>] [-A <AUTH>[,<AUTH>,...]] [-R <ROLE>[,ROLE,...]] [-P <PROFILE>[,<PROFILE>,...] [-s <SHELL>] <USER>) | -f <FILE>)\n";
+		print "  $prgname -m (([-c <GECOS>] [-g <GROUP>] [-G <GROUP>[,<GROUP>,...] [-d <DIR>] [-R <ROLE>[,ROLE,...]] [-s <SHELL>] <USER>) | -f <FILE>)\n";
+		print "    Modify user(s)\n";
+	}
+	if(defined $opts{"r"}|| (!defined $opts{"m"} && !defined $opts{"a"} && !defined $opts{"l"} && !defined $opts{"S"} && !defined $opts{"p"} && !defined $opts{"p"})) {
+		print "  $prgname -r (<USER> | -f <FILE>)\n";
+		print "    remove user(s)\n";
+	}
+	if(defined $opts{"S"} || (!defined $opts{"m"} && !defined $opts{"a"} && !defined $opts{"l"} && !defined $opts{"S"} && !defined $opts{"r"} && !defined $opts{"p"})) {
+		print "  $prgname -S (<USER> | -f <FILE>)\n";
+		print "    Show user(s) detailed information.\n";
+		if (defined $opts{"S"}) {
+			print "    <USER> a user name\n";
+			print "    <FILE> the path to a file containting a list of user names\n";
+		}
+	}
+	if(defined $opts{"l"} || (!defined $opts{"m"} && !defined $opts{"a"} && !defined $opts{"l"} && !defined $opts{"S"} && !defined $opts{"r"} && !defined $opts{"p"})) {
+		print "  $prgname -l <USER> | -f <FILE>)\n";
+		print "    lock user(s)\n";
+	}
+	if(defined $opts{"p"} || (!defined $opts{"m"} && !defined $opts{"a"} && !defined $opts{"l"} && !defined $opts{"S"} && !defined $opts{"r"} && !defined $opts{"p"})) {
+		print "  $prgname -p (-e [(<PASSWD> | -f <FILE>)] | ([-C] (<USER> <PASSWD> | -f <FILE>))\n";
+		print "    Reset/Generate user(s) password\n";
+		print "    -e can be used to generate an encrypted password.\n";
+		print "       If <PASSWORD> is omitted the user will be prompted.\n";
+		print "    -C the <PASSWD> passed is already encrypted.  Omitting this option is considered insecure.\n";
+	}
+	print "-O <operator uid>\n";
+
+	print "  A file path can be a file on the local box or a remote box in the form of <HOST>@<FILE>.\n ";
+	print "    The current user must be able access the file via ssh.\n";
+	write_log("END $prgname\n");
+	exit 0;
+}
+
+sub main::VERSION_MESSAGE() {
+	print "$prgname Version:$prgver\n"
+}
+
+sub main::cryptPWD($) {
+	my ($pw)= @_;
+	my $pwd=crypt($pw,join("", (".", "/", 0..9, "A".."Z", "a".."z")[rand 64,rand 64]));
+	return $pwd;
+}
+
+sub getord{
+    my $char;
+    #if (defined ($char = ReadKey(0))){}
+    #$char = getc(STDIN);
+    sysread(STDIN,$char,1);
+    return ord($char);
+}
+
+sub clearstream{
+    while(1){
+        my $char;
+        if (defined ($char = ReadKey(-1)) ){}else{return}
+    }
+    return ;
+}
+
+sub mask_pwd{
+    `/usr/bin/stty -echo`;
+    my $password = '';
+    while(1){
+        my $ord = getord();
+        if ($ord == 10){last}    # "Enter"
+        if ($ord == 127) { # ie "Backspace"
+            chop($password);
+            print chr(8),' ',chr(8);
+            next;
+        }
+        if($ord == 27){clearstream();$ord="\0"}
+        if($ord ne "\0"){
+            $password .= chr($ord);
+            print '*';
+        }
+    }
+    `/usr/bin/stty echo`;
+    return $password;
+}
+
+########
+# MAIN
+########
+main::help() if defined $opts{h};
+
+if(defined $opts{"O"}) {
+	$REAL_USER=$opts{"O"};
+}
+#Check for user in secuirty group
+my ($sgroup, $spwd, $sgid, $members)=getgrnam("security");
+chomp($members);
+foreach (split(" ",$members)) {
+	if($REAL_USER eq $_) {
+		$SECURITY =1;
+	}
+}
+#check for security is users primary group
+($junk,$junk,$junk,my $gid,$junk,$junk,$junk,$junk,$junk,$junk)= getpwnam($REAL_USER);
+if(defined $gid && $sgid == $gid) {
+	$SECURITY =1;
+}
+
+if ( -d "/usr/seos") {
+	$SEOS=1;
+}
+if(defined $opts{"t"}) {
+	$SEOS=!$SEOS;
+}
+
+if ($SEOS) {
+	if (defined $opts{"m"} && defined $opts{"G"}) {
+		print STDERR "ERROR: Usrmgr does not support CA eTrust bulk Group modification.\n";
+		write_log("ERROR: Usrmgr does not support CA eTrust bulk Group modification.\n");
+		write_log("END $prgname\n");
+		exit 1;
+	}
+	if (defined $opts{"C"}) {
+		print STDERR "ERROR: CA eTrust does not accept preencrypted passwords.\n";
+		write_log("ERROR: CA eTrust does not accept preencrypted passwords.\n");
+		write_log("END $prgname\n");
+		exit 1;
+	}
+	if (defined $opts{"R"}) {
+		print STDERR "WARNING: CA eTrust does not support the Roles switch.\n";
+		write_log("WARNING: CA eTrust does not support the Roles switch.\n");
+	}
+#	if (defined $opts{"A"}) {
+#		print STDERR "WARNING: CA eTrust does not support the Auth switch.\n";
+#		write_log("WARNING: CA eTrust does not support the Auth switch.\n");
+#	}
+#	if (defined $opts{"P"}) {
+#		print STDERR "WARNING: CA eTrust does not support the Profile switch.\n";
+#		write_log("WARNING: CA eTrust does not support the Profile switch.\n");
+#	}
+}
+
+if (defined $opts{"a"} || defined $opts{"m"}) { #ADD USER MODIFY USER
+	if (defined $opts{"C"} || defined $opts{"l"} || defined $opts{"p"} || defined $opts{"S"} || defined $opts{"r"}) {
+		print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+		write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+		write_log("END $prgname\n");
+		exit 1;
+	}
+	if ($SEOS && defined $opts{"m"} && defined $opts{"G"}) {
+		print STDERR "ERROR: CA eTrust does not support the bulk Group modification.\n";
+		write_log("ERROR: CA eTrust does not support the bulk Group modification.\n");
+		write_log("END $prgname\n");
+		exit 1;
+	}
+    if (defined $opts{"f"}) {
+        my $file=$opts{"f"};
+        my $host;
+		if ($#ARGV!=-1) {
+			print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+			write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+			write_log("END $prgname\n");
+			exit 1;
+		}
+        
+        if ( $file =~ /:/ ) {
+            ($host ,$file)=split(/:/,$file);
+            $file="/usr/bin/ssh ".$host." /usr/bin/cat ".$file." |";
+        }
+        open INPUT,$file or die "ERROR: Can't open file: '".$file."': $!.\n";
+		my (@LABELS,$uf,$found,$uid);
+		$uf=0;$found=0;$uid=0;
+        while (<INPUT>) {
+            my $line=$_;
+			chomp($line);
+			if(!@LABELS) {
+				@LABELS=split(/:/,$line);
+				foreach (@LABELS) {
+					if ( $_ eq "USER") {
+						$found=1;
+					} elsif ( $_ eq "UID") {
+						if(defined $opts{"m"}) {
+							print STDERR "ERROR: Cannot use UID field with modify switch (-m)\n";
+							write_log("ERROR: Cannot use UID field with modify switch (-m)\n");
+							write_log("END $prgname\n");
+							exit 1;
+						}
+						$uid=0;
+					} elsif ($_ eq "GROUP") {
+					} elsif ($_ eq "GROUPS") {
+					} elsif ($_ eq "DIR") {
+#					} elsif ($_ eq "AUTH") {
+#						if ($SEOS) {
+#							print STDERR "WARNING: CA eTrust does not support the Auth field.\n";
+#							write_log("WARNING: CA eTrust does not support the Auth field.\n");
+#						}
+					} elsif ($_ eq "ROLE") {
+						if ($SEOS) {
+							print STDERR "WARNING: CA eTrust does not support the Roles field.\n";
+							write_log("WARNING: CA eTrust does not support the Roles field.\n");
+						}
+#					} elsif ($_ eq "PROFILE") {
+#						if ($SEOS) {
+#							print STDERR "WARNING: CA eTrust does not support the Profile field.\n";
+#							write_log("WARNING: CA eTrust does not support the Profile field.\n");
+#						}
+					} elsif ($_ eq "GECOS") {
+					} elsif ($_ eq "SHELL") {
+					} else {
+						print STDERR "ERROR: Invalid Field \"$_\" \n";
+						write_log("ERROR: Invalid Field \"$_\" \n");
+						write_log("END $prgname\n");
+						exit(1);
+					}
+					if(!$found) {
+						$uf++;
+					}
+				} 
+				if (!$found) {
+					print STDERR "ERROR: USER field not defined.\n";
+					write_log("ERROR: USER field not defined.\n");
+					write_log("END $prgname\n");
+					exit 1;
+				}
+				if (!$uid && defined $opts{"a"}) {
+					print STDERR "ERROR: UID field not defined.\n";
+					write_log("ERROR: UID field not defined.\n");
+					write_log("END $prgname\n");
+					exit 1;
+				}
+			} else {
+				my @FIELDS=split(/:/,$line),my $cnt=0;
+				foreach (@FIELDS) {
+					if	($cnt!=$uf) {
+						$users{$FIELDS[$uf]}{$LABELS[$cnt]}=$FIELDS[$cnt];
+					}
+					$cnt++;
+				}
+			}
+        }
+        close INPUT;
+	} else {
+		if ($#ARGV!=0) {
+			print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+			write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+			write_log("END $prgname\n");
+			exit 1;
+		}
+		if (defined $opts{"u"} && defined $opts{"m"}) {
+			print STDERR "ERROR: Cannot modify uid(s)\n";
+			write_log("ERROR: Cannot modify uid(s)\n");
+			write_log("END $prgname\n");
+			exit 1;
+		}
+		my $USER=$ARGV[0];
+		chomp($USER);
+		$users{$USER}{"USER"}=$USER;
+		if (defined $opts{"u"}) {
+			$users{$USER}{"UID"}=$opts{"u"};
+		} elsif (defined $opts{"a"}) {
+			print STDERR "ERROR: uid must be defined\n";
+			write_log("ERROR: uid must be defined\n");
+			write_log("END $prgname\n");
+			exit 1;
+		}
+		if (defined $opts{"g"}) {
+			$users{$USER}{"GROUP"}=$opts{"g"};
+		}
+		if (defined $opts{"G"}) {
+			$users{$USER}{"GROUPS"}=$opts{"G"};
+		}
+		if (defined $opts{"d"}) {
+			$users{$USER}{"DIR"}=$opts{"d"};
+		}
+		if (defined $opts{"A"}) {
+			$users{$USER}{"AUTH"}=$opts{"A"};
+		}
+		if (defined $opts{"R"}) {
+			$users{$USER}{"ROLE"}=$opts{"R"};
+		}
+		if (defined $opts{"P"}) {
+			$users{$USER}{"PROFILE"}=$opts{"P"};
+		}
+		if (defined $opts{"c"}) {
+			$users{$USER}{"GECOS"}=$opts{"c"};
+		}
+		if (defined $opts{"s"}) {
+			$users{$USER}{"SHELL"}=$opts{"s"};
+		}
+	}
+	foreach my $USER (keys %users) {
+		if(!defined getpwnam($USER)) { 
+			if(defined $opts{"m"}) {
+				print STDERR "ERROR: User \"".$USER."\" does not exist\n" ;
+				write_log("ERROR: User \"".$USER."\" does not exist\n" );
+				$errcode++;
+				next;
+			}
+		} else {
+			if(defined $opts{"a"}) {
+				print STDERR "ERROR: User \"".$USER."\" already exists\n" ;
+				write_log("ERROR: User \"".$USER."\" already exists\n" );
+				$errcode++;
+				next;
+			}
+		}
+		if(!check_uid($USER, $users{$USER}{"UID"})) {
+			print STDERR "ERROR: Can't add/modify \"$USER\": Insufficent Privledges.\n";
+			write_log("ERROR: Can't add/modify \"$USER\": Insufficent Privledges.\n");
+			$errcode++;
+			next;
+		}
+		my $old_errcode=$errcode;
+        if(defined $users{$USER}{"GROUPS"}) {
+			foreach (split(",",$users{$USER}{"GROUPS"})) {
+				my $group=$_;
+				if(!defined getgrnam($group)) {
+					print STDERR "ERROR: Can't add/modify user \"".$USER."\" to group \"$group\": group does not exist\n" ;
+					write_log("ERROR: Can't add/modify user \"".$USER."\" to group \"$group\": group does not exist\n" );
+					$errcode++;
+				}
+				if(!check_gid($group,-1)) {
+					print STDERR "ERROR: Can't add/modify user \"$USER\" to group \"$group\": Insufficent Privledges.\n";
+					write_log("ERROR: Can't add/modify user \"$USER\" to group \"$group\": Insufficent Privledges.\n");
+					$errcode++;
+				}
+			}
+		}
+		if($old_errcode!=$errcode) { #if the one of the GROUPS has an issue 
+			next;	
+		}
+        if(defined $users{$USER}{"GROUP"}) {
+			if(!defined getgrnam($users{$USER}{"GROUP"})) {
+				print STDERR "ERROR: Can't add/modify user \"".$USER."\" to group \"".$users{$USER}{"GROUP"}."\": group does not exist\n" ;
+				write_log("ERROR: Can't add/modify user \"".$USER."\" to group \"".$users{$USER}{"GROUP"}."\": group does not exist\n" );
+				$errcode++;
+				next;
+            }
+			if(!check_gid($users{$USER}{"GROUP"},-1)) {
+				print STDERR "ERROR: Can't add/modify user \"$USER\" to group \"".$users{$USER}{"GROUP"}."\": Insufficent Privledges.\n";
+				write_log("ERROR: Can't add/modify user \"$USER\" to group \"".$users{$USER}{"GROUP"}."\": Insufficent Privledges.\n");
+				$errcode++;
+				next;
+			}
+		}
+		if(defined $opts{"a"} && defined getpwuid($users{$USER}{'UID'})) { 
+			print STDERR "ERROR: UID \"".$users{$USER}{'UID'}."\" already exists\n" ;
+			write_log("ERROR: UID \"".$users{$USER}{'UID'}."\" already exists\n" );
+			$errcode++;
+			next;
+		}
+		my $command; 
+		if (defined $opts{"m"}) { #MODIFY
+			if($SEOS) {
+				$command="/usr/seos/bin/selang -s -c \"eu $USER";
+			} else {
+				$command="/usr/sbin/usermod";
+			}
+		} else {				#ADD
+			if($SEOS) {
+				$command="umask 022; /usr/seos/bin/selang -s -c \"nu $USER";
+			} else {
+				$command="umask 022; /usr/sbin/useradd -m";
+			}
+		}
+		if($SEOS) {
+			if (defined $users{$USER}{"GECOS"}) {
+				$command.=" comment(\'".$users{$USER}{"GECOS"}."\')";
+			}
+			$command.=" gowner(security) unix(";
+		}
+		if (defined $opts{"a"}) {
+			if($SEOS) {
+				$command.=" userid( ".$users{$USER}{"UID"}.")";
+			} else {
+				$command.=" -u ".$users{$USER}{"UID"};
+			}
+		}
+		if (defined $users{$USER}{"GROUP"}) {
+			if($SEOS) {
+				$command.=" pgroup(".$users{$USER}{"GROUP"}.")";
+			} else {
+				$command.=" -g \"".$users{$USER}{"GROUP"}."\"";
+			}
+		}
+		my $the_dir;
+		if (defined $users{$USER}{"DIR"}) {
+			$the_dir=$users{$USER}{"DIR"};
+		} elsif (defined $opts{"a"}) {
+			if($OS eq "AIX") {
+				$the_dir="/home/$USER";
+			} else {
+				$the_dir="/export/home/$USER";
+			}
+		}
+		if (defined $the_dir) {
+			if($SEOS) {
+				$command.="  homedir(".$the_dir.")";
+			} else {
+				$command.=" -d \"".$the_dir."\"";
+				if (defined $opts{"m"}) {
+					$command.=" -m";
+				}
+			}
+		}
+		if (defined $users{$USER}{"GECOS"}) {
+			if($SEOS) {
+				$command.=" gecos(\'".$users{$USER}{"GECOS"}."\')";
+			} else {
+				$command.=" -c \"".$users{$USER}{"GECOS"}."\"";
+			}
+		}
+		if (defined $users{$USER}{"SHELL"}) {
+			if($SEOS) {
+				$command.=" shellprog(".$users{$USER}{"SHELL"}.")";
+			} else {
+				$command.=" -s \"".$users{$USER}{"SHELL"}."\"";
+			}
+		}
+		if($SEOS) {
+			$command.=")\"";
+			if((my $err=run_command($command))) {
+				command_error($command,$err);
+			} else {
+				if(defined $opts{"a"}) {
+					$command="/usr/seos/bin/selang -s -c \"eu $USER inactive-\"";
+					if((my $err=run_command($command))) {
+						command_error($command,$err);
+					}
+				}
+				if (defined $users{$USER}{"GROUP"}) {
+					$command="/usr/seos/bin/selang -s -c \"join $USER group(".$users{$USER}{"GROUP"}.") gowner(security) unix\"";
+					if((my $err=run_command($command))) {
+						command_error($command,$err);
+					}
+				}
+				if (defined $users{$USER}{"GROUPS"}) {
+					foreach my $GROUP (split(",", $users{$USER}{"GROUPS"})) {
+						$command="/usr/seos/bin/selang -s -c \"join $USER group($GROUP) gowner(security) unix\"";
+						if((my $err=run_command($command))) {
+							command_error($command,$err);
+						}
+					}
+				}
+			}
+		} else {
+#			if (defined $users{$USER}{"AUTH"}) {
+#				if(!$SECURITY) {
+#					print STDERR "ERROR: Can't set AUTHs for \"$USER\" Insufficent Privledges.\n";
+#					write_log("ERROR: Can't set AUTHs for \"$USER\" Insufficent Privledges.\n");
+#					$errcode++;
+#					next;
+#				}
+#				$command.=" -A \"".$users{$USER}{"AUTH"}."\"";
+#			}
+			if ($ARCH eq "i386" && defined $users{$USER}{"ROLE"}) {
+				if(!$SECURITY) {
+					print STDERR "ERROR: Can't set Roles for \"$USER\" Insufficent Privledges.\n";
+					write_log("ERROR: Can't set Roles for \"$USER\" Insufficent Privledges.\n");
+					$errcode++;
+					next;
+				}
+				$command.=" -R \"".$users{$USER}{"ROLE"}."\"";
+			}
+#			if (defined $users{$USER}{"PROFILE"}) {
+#				if(!$SECURITY) {
+#					print STDERR "ERROR: Can't set Profiles for \"$USER\" Insufficent Privledges.\n";
+#					write_log("ERROR: Can't set Profiles for \"$USER\" Insufficent Privledges.\n");
+#					$errcode++;
+#					next;
+#				}
+#				$command.=" -P \"".$users{$USER}{"PROFILE"}."\"";
+#			}
+			if (defined $users{$USER}{"GROUPS"}) {
+				$command.=" -G \"".$users{$USER}{"GROUPS"}."\"";
+			}
+			$command.=" $USER";
+			if((my $err=run_command($command))) {
+				command_error($command,$err);
+			}
+		}
+	}
+} elsif (defined $opts{"S"}) { #SHOW USER
+	if (defined $opts{"A"} || defined $opts{"R"} || defined $opts{"P"} || defined $opts{"G"} || defined $opts{"c"} || defined $opts{"d"} || defined $opts{"p"} || defined $opts{"l"} || defined $opts{"g"} || defined $opts{"a"} || defined $opts{"m"} || defined $opts{"u"} || defined $opts{"s"} || defined $opts{"r"}) {
+		print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+		exit 1;
+	}
+	if (defined $opts{"f"}) {
+        my $file=$opts{"f"};
+        my $host;
+        if ($#ARGV>0) {
+            print STDERR "ERROR: Undefined argument\n.";
+            exit 1;
+        }
+        if ( $file =~ /:/ ) {
+            ($host ,$file)=split(/:/,$file);
+            $file="/usr/bin/ssh ".$host." /usr/bin/cat ".$file." |";
+        }
+        open INPUT,$file or die "ERROR: Can't open file: '".$file."': $!.\n";
+        while (<INPUT>) {
+            my $line=$_;
+            chomp($line);
+            my ($USER, $PASSWD);
+            ($USER,$PASSWD)=split(/:/,$line);
+            if(!defined getpwnam($USER)) {
+                print STDERR "ERROR: \"".$USER."\" is not a valid user\n" ;
+                $errcode++;
+                next;
+            }
+			$users{$USER}=$USER;
+        }
+        close INPUT;
+    } else {
+		my $USER=$ARGV[0];
+		chomp($USER);
+		if($#ARGV!=0) {
+			print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+			exit 1;
+		} else {
+			if(!defined getpwnam($USER)) {
+				print STDERR "ERROR: \"".$USER."\" is not a valid user\n" ;
+				exit(1);
+			}
+			$users{$USER}=$USER;
+		}
+	}
+    if (keys(%users)) {
+        foreach my $USER (keys %users) {
+            if ($SEOS) {
+				my $command= "/usr/seos/bin/selang -s -c \"su $USER unix\"";
+				if((my $err=run_command($command))) {
+					command_error($command,$err);
+				}
+            } else {
+				(my $name, my $pass,my  $uid,my  $gid,my  $quota,my  $comment,my $gcos,my  $dir,my  $shell,my  $expire)= getpwnam($USER);
+
+				print "uname: $name\nuid: $uid\nprimary group: ".getgrgid($gid)."\ngecos: $gcos\nhome dir: $dir\nshell: $shell\n";
+                #my $command="/usr/bin/grep $USER /etc/passwd";
+				#if((my $err=run_command($command))) {
+				#	command_error($command,$err);
+				#}
+				if ( $ARCH eq "i386" ) {
+					my $command= "/usr/bin/roles $USER";
+					print "Roles: ";
+					if((my $err=run_command($command))) {
+						command_error($command,$err);
+					}
+					$command= "/usr/bin/profiles $USER";
+#					print "Profiles: ";
+#					if((my $err=run_command($command))) {
+#						command_error($command,$err);
+#					}
+#					$command= "/usr/bin/auths $USER";
+#					print "Auths: ";
+#					if((my $err=run_command($command))) {
+#						command_error($command,$err);
+#					}
+				}
+				my $groups;
+				while(($sgroup,$spwd,$sgid,$members)=getgrent) {
+					foreach (split(" ",$members)) {
+						if($USER eq $_) {
+							$groups.=defined $groups?",$sgroup":"$sgroup";
+						}
+					}
+				}
+				print "secondary groups: ".$groups."\n";
+
+            }
+        }
+    }
+
+} elsif (defined $opts{"r"}) { #REMOVE USER
+	if (defined $opts{"A"} || defined $opts{"R"} || defined $opts{"P"} || defined $opts{"G"} || defined $opts{"c"} || defined $opts{"d"} || defined $opts{"p"} || defined $opts{"l"} || defined $opts{"g"} || defined $opts{"a"} || defined $opts{"m"} || defined $opts{"u"} || defined $opts{"s"} || defined $opts{"S"}) {
+		print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+		write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+		write_log("END $prgname\n");
+		exit 1;
+	}
+    if (defined $opts{"f"}) {
+        my $file=$opts{"f"};
+        my $host;
+        if ($#ARGV>0) {
+            print STDERR "ERROR: Undefined argument\n.";
+            write_log("ERROR: Undefined argument\n.");
+			write_log("END $prgname\n");
+            exit 1;
+        }
+        if ( $file =~ /:/ ) {
+            ($host ,$file)=split(/:/,$file);
+            $file="/usr/bin/ssh ".$host." /usr/bin/cat ".$file." |";
+        }
+        open INPUT,$file or die "ERROR: Can't open file: '".$file."': $!.\n";
+        while (<INPUT>) {
+            my $USER=$_;
+            chomp($USER);
+            if(!defined getpwnam($USER)) {
+                print STDERR "ERROR: \"".$USER."\" is not a valid user\n" ;
+                write_log("ERROR: \"".$USER."\" is not a valid user\n" );
+                $errcode++;
+                next;
+            }
+			$users{$USER}=$USER;
+        }
+        close INPUT;
+    } else {
+        if($#ARGV!=0) {
+			print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+			write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+			write_log("END $prgname\n");
+            exit 1;
+        } else {
+			my $USER=$ARGV[0];
+			chomp($USER);
+            if(!defined getpwnam($USER)) {
+                print STDERR "ERROR: \"".$USER."\" is not a valid user\n" ;
+                write_log("ERROR: \"".$USER."\" is not a valid user\n" );
+				write_log("END $prgname\n");
+                exit(1);
+            }
+			$users{$USER}=$USER;
+        }
+    }
+	if (keys(%users)) {
+		foreach my $USER (keys %users) {
+			if(!check_uid($USER,-1)) {
+				print STDERR "ERROR: Can't remove \"$USER\" Insufficent Privledges.\n";
+				write_log("ERROR: Can't remove \"$USER\" Insufficent Privledges.\n");
+				$errcode++;
+				next;
+			}
+			my $command;
+			if ($SEOS) {
+				$command="/usr/seos/bin/selang -s -c \"ru $USER\"";
+			} else {
+				$command= "/usr/sbin/userdel $USER";
+			}
+			if((my $err=run_command($command))) {
+				command_error($command,$err);
+			}
+		}
+	}
+
+} elsif (defined $opts{"p"} || defined $opts{"l"}) { ## Change PASSWORD or LOCK account
+	if (defined $opts{"A"} || defined $opts{"R"} || defined $opts{"P"} || defined $opts{"G"} || defined $opts{"c"} || defined $opts{"d"} || defined $opts{"a"} || defined $opts{"m"} || defined $opts{"S"} || defined $opts{"u"} || defined $opts{"s"} || defined $opts{"r"}) {
+		print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+		write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+		write_log("END $prgname\n");
+		exit 1;
+	}
+	if (defined $opts{"p"} && defined $opts{"l"}) {
+		print STDERR "ERROR: Can't use -l and -p in same command.\n";
+		write_log("ERROR: Can't use -l and -p in same command.\n");
+		write_log("END $prgname\n");
+		exit 1;
+	}
+	if (defined $opts{"l"} && (defined $opts{"C"} || defined $opts{"e"})) {
+		print STDERR "ERROR: Invalid option with -l.\n";
+		write_log("ERROR: Invalid option with -l.\n");
+		write_log("END $prgname\n");
+		exit 1;
+	}
+	if (defined $opts{"f"}) {
+		my $file=$opts{"f"};
+		my $host;
+		if ($#ARGV>0) {
+			print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+			write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+			write_log("END $prgname\n");
+			exit 1;
+		}
+		if ( $file =~ /:/ ) {
+			($host ,$file)=split(/:/,$file);
+			$file="/usr/bin/ssh ".$host." /usr/bin/cat ".$file." |";
+		} 
+		open INPUT,$file or die "ERROR: Can't open file: '".$file."': $!.\n";
+		while (<INPUT>) {
+			my $line=$_;
+			chomp($line);
+			my ($USER, $PASSWD);
+			($USER,$PASSWD)=split(/:/,$line);
+			if(!defined getpwnam($USER)) {
+				print STDERR "ERROR: \"".$USER."\" is not a valid user\n" ;
+				write_log("ERROR: \"".$USER."\" is not a valid user\n" );
+				$errcode++;
+				next;
+			}
+			if(!check_uid($USER,-1)) {
+				print STDERR "ERROR: Can't modify \"$USER\": Insufficent Privledges.\n";
+				write_log("ERROR: Can't modify \"$USER\": Insufficent Privledges.\n");
+				$errcode++;
+				next;
+			}
+			if (defined $opts{"l"}) {
+				$users{$USER}="*LK*";
+			} else {
+				chomp($PASSWD);
+				if (defined $opts{"C"} || $SEOS) {
+					$users{$USER}=$PASSWD;
+				} else {
+					if (defined $opts{"e"}) {
+						print "$USER,".cryptPWD($PASSWD)."\n";
+					} else {
+						$users{$USER}=cryptPWD($PASSWD)
+					}
+				}
+			}
+		}
+		close INPUT;
+	} else {
+		if (defined $opts{"e"}) {
+			if($#ARGV==0) {
+				my $PWD=$ARGV[0];
+				print cryptPWD($PWD)."\n";
+			} elsif ($#ARGV==-1) {
+				print "Enter Password:";
+				my $pwd1 = mask_pwd();
+				print "\nEnter Again:";
+				my $pwd2 = mask_pwd();
+				if( $pwd1 eq $pwd2) {
+					print "\n".cryptPWD($pwd1)."\n";
+				} else {
+					print STDERR "\nPassword mismatch!!\n";
+					write_log("END $prgname\n");
+					exit 1;
+				}
+			} else {
+				print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+				write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+				write_log("END $prgname\n");
+				exit 1;
+			}
+			write_log("END $prgname\n");
+			exit 0;
+		} else {
+			if (defined $opts{"l"}) {
+				if($#ARGV!=0) {
+					print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+					write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+					write_log("END $prgname\n");
+					exit 1;
+				} 
+			} else {
+				if($#ARGV!=1) {
+					print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+					write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+					write_log("END $prgname\n");
+					exit 1;
+				}
+			}
+			my $USER=$ARGV[0],my $PWD;
+			chomp($USER);
+			if(!defined getpwnam($USER)) {
+				print STDERR "ERROR: \"".$USER."\" is not a valid user\n" ;
+				write_log("ERROR: \"".$USER."\" is not a valid user\n" );
+				write_log("END $prgname\n");
+				exit(1);
+			}
+			if(!check_uid($USER,-1)) {
+				print STDERR "ERROR: Can't modify \"$USER\": Insufficent Privledges.\n";
+				write_log("ERROR: Can't modify \"$USER\": Insufficent Privledges.\n");
+				$errcode++;
+				exit(1);
+			}
+			if (defined $opts{"l"}) {
+				$users{$USER}="*LK*";
+			} else {
+				$PWD=$ARGV[1];
+				chomp($PWD);
+				if (defined $opts{"C"} || $SEOS) {
+					$users{$USER}=$PWD;
+				} else {
+					$users{$USER}=cryptPWD($PWD)
+				}
+			} 
+		}
+		if (keys(%users)) {
+			if ($SEOS) {
+				foreach my $USER (keys %users) {
+					if(defined $opts{"l"}) {
+						my $command="/usr/seos/bin/selang -s -c \"eu $USER suspend unix(shell(/bin/false))\"";
+						if((my $err=run_command($command))) {
+							command_error($command,$err);
+						}
+						my $date=`date +%x`;
+						chomp($date);
+						$command="/usr/seos/bin/selang -s -c \"eu $USER unix(gecos('id disabled by $REAL_USER on ".$date."'))\"";
+						if((my $err=run_command($command))) {
+							command_error($command,$err);
+						}
+						$command="/usr/seos/bin/selang -s -c \"eu $USER password(fd89el0s)\"";
+						if((my $err=run_command($command))) {
+							command_error($command,$err);
+						}
+					} else {
+						my $command="/usr/seos/bin/selang -s -c \"eu $USER password(\"$users{$USER}\") resume";
+						if((my $err=run_command($command))) {
+							command_error($command,$err);
+						}
+					}
+				}
+			} else {
+				print "Backing up  $PASSWD_FILE...\n";
+				write_log("Backing up  $PASSWD_FILE...\n");
+				my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime(time);
+				my $uname=`/usr/bin/uname -n`;
+				chomp($uname);
+				my $date=sprintf $uname.".%4d%02d%02d.%02d%02d%02d", $year+1900,$mon+1,$mday,$hour,$min,$sec;
+				if(!defined $opts{"T"}) {
+					if($OS eq "SunOS") {
+						open LOCK,">",$LOCK_FILE or die "ERROR: Could open lock $LOCK_FILE: $!\n";
+						flock(LOCK,LOCK_EX);
+						copy($PASSWD_FILE,$OPASSWD_FILE) or die "ERROR: Could not backup $PASSWD_FILE to $OPASSWD_FILE: $!\n";
+					}
+					my $BACK_PASSWD=$PASSWD_FILE.".bak.".$date;
+					$BACK_PASSWD =~/(\S+)/;
+					$BACK_PASSWD = $1;  # extracted data is considered safe
+					copy($PASSWD_FILE,$BACK_PASSWD) or die "ERROR: Could not backup $PASSWD_FILE: $!\n";
+				} else {
+					if($OS eq "SunOS") {
+						print "*touch $LOCK_FILE\n";
+						print "copy($PASSWD_FILE,$OPASSWD_FILE)\n";
+					}
+					print "*copy($PASSWD_FILE,$PASSWD_FILE.bak.$date)\n";
+				}
+
+				print "Creating work file ".$PASSWD_FILE.".new...\n";
+				write_log("Creating work file ".$PASSWD_FILE.".new...\n");
+				open INPUT,"<",$PASSWD_FILE or die "ERROR: Can't open file: '".$PASSWD_FILE."': $!.\n";
+				if($OS eq "AIX") {
+					flock(INPUT,LOCK_SH) if (!defined $opts{"T"});
+				}
+				my $NFILE=$PASSWD_FILE.".new";
+				if(!defined $opts{"T"}) {
+					open OUTPUT,">",$NFILE or die "ERROR: Can't open file: '".$NFILE."': $!.\n";
+					if($OS eq "AIX") {
+						chmod 0644, $NFILE or die "ERROR: Could not set permissions on '".$NFILE."': $!.\n";
+					} else {
+						chmod 0400, $NFILE or die "ERROR: Could not set permissions on '".$NFILE."': $!.\n";
+					}
+				}
+				my ($uid,$pwd,$rest);
+				my $puser="";
+				while (<INPUT>) {
+					($uid,$pwd,$rest)=split(/:/,$_,3);
+					if (defined $users{$uid}) {
+						if ($OS eq "AIX") {
+							$pwd="!";
+						} else {
+							$pwd=$users{$uid};
+						}	
+					}
+					if(!defined $opts{"T"}) {
+						print OUTPUT $uid.":".$pwd.":".$rest;
+					} else {
+						print $uid.":".$pwd.":".$rest;
+					}
+				}
+				close INPUT;
+				if(!defined $opts{"T"}) {
+					move $NFILE,$PASSWD_FILE or die "ERROR: Could not move $NFILE to $PASSWD_FILE: $!.\n";
+					close OUTPUT;
+					if($OS eq "SunOS") {
+					    close(LOCK) or die "ERROR; Can't unlock $LOCK_FILE";
+					    unlink($OPASSWD_FILE) or die "ERROR; Can't remove $OPASSWD_FILE";
+					}
+				} else {
+					print "*move $NFILE,$PASSWD_FILE\n";
+					if($OS eq "SunOS") {
+					    print "*close($LOCK_FILE)\n";
+						print "*unlink($OPASSWD_FILE)\n";
+					}
+				}
+
+				if($OS eq "AIX") {
+					print "Backing up  $SEC_PASSWD_FILE...\n";
+					write_log("Backing up  $SEC_PASSWD_FILE...\n");
+					my $date=sprintf $uname.".%4d%02d%02d.%02d%02d%02d", $year+1900,$mon+1,$mday,$hour,$min,$sec;
+					if(!defined $opts{"T"}) {
+						copy($SEC_PASSWD_FILE,$SEC_PASSWD_FILE.".bak.".$date) or die "ERROR: Could not backup $SEC_PASSWD_FILE: $!\n";
+					} else {
+						print "*copy($SEC_PASSWD_FILE,$SEC_PASSWD_FILE.bak.$date)\n";
+					}
+
+					print "Creating work file ".$SEC_PASSWD_FILE.".new...\n";
+					write_log("Creating work file ".$SEC_PASSWD_FILE.".new...\n");
+					open INPUT,"<",$SEC_PASSWD_FILE or die "ERROR: Can't open file: '".$SEC_PASSWD_FILE."': $!.\n";
+                    flock(INPUT,LOCK_SH) if (!defined $opts{"T"});
+					my $NFILE=$SEC_PASSWD_FILE.".new";
+					if(!defined $opts{"T"}) {
+						open OUTPUT,">",$NFILE or die "ERROR: Can't open file: '".$NFILE."': $!.\n";
+						chmod 0400, $NFILE or die "ERROR: Could not set permissions on '".$NFILE."': $!.\n";
+					}
+					my %pwd_changed; #for AIX only
+					while (<INPUT>) {
+						my $line= $_;
+                        my $junk;
+                        if($line=~/:/) {
+                            ($uid,$junk)=split(/:/,$line);
+                            if (defined $users{$uid}) {
+                                $pwd=$users{$uid};
+                                $puser=$uid;
+                            }
+							if(!defined $opts{"T"}) {
+								print OUTPUT $line;
+							} else {
+								print $line;
+							}
+                        } elsif($line=~/lastupdate/) {
+                            if($puser eq $uid) {
+                                if(!defined $opts{"T"}) {
+                                    print OUTPUT "\tlastupdate = ".time()."\n";
+                                } else {
+                                    print "\tlastupdate = ".time()."\n";
+                                }
+                            } else {
+                                if(!defined $opts{"T"}) {
+                                    print OUTPUT $line;
+                                } else {
+                                    print $line;
+                                }
+                            }
+                        } elsif($line=~/flags/) {
+                            if($puser eq $uid) {
+                                if(!defined $opts{"T"}) {
+                                    print OUTPUT "\tflags = \n";
+                                } else {
+                                    print "\tflags = \n";
+                                }
+                            } else {
+                                if(!defined $opts{"T"}) {
+                                    print OUTPUT $line;
+                                } else {
+                                    print $line;
+                                }
+                            }
+
+                        } elsif($line=~/password/) {
+                            if($puser eq $uid) {
+								if(!defined $opts{"T"}) {
+									print OUTPUT "\tpassword = $pwd\n";
+								} else {
+									print "\tpassword = $pwd\n";
+								}
+                                $pwd_changed{$puser}=1; #need to do this becuase AIX does not create NULL pwd in password file
+                                #$puser="";
+                            } else {
+								if(!defined $opts{"T"}) {
+									print OUTPUT $line;
+								} else {
+									print $line;
+								}
+                            }
+                        } else {
+							if(!defined $opts{"T"}) {
+								print OUTPUT $line;
+							} else {
+								print $line;
+							}
+                        }
+                    }
+					if($OS eq "AIX") { #Add the password that you did not find but changed
+						foreach $uid (keys %users) {
+							if(!defined($pwd_changed{$uid})) {
+								if(!defined $opts{"T"}) {
+
+									print OUTPUT "\n$uid:\n\tpassword = $users{$uid}\n\tlastupdate = ".time()."\n\tflags = \n";
+								} else {
+									print "\n$uid:\n\tpassword = $users{$uid}\n\tlastupdate = ".time()."\n\tflags = \n";
+								}
+							}
+						}
+					}
+					close INPUT;
+					if(!defined $opts{"T"}) {
+						move $NFILE,$SEC_PASSWD_FILE or die "ERROR: Could not move $NFILE to $SEC_PASSWD_FILE: $!.\n";
+						close OUTPUT;
+					} else {
+						print "*move $NFILE,$SEC_PASSWD_FILE\n";
+					}
+				}
+
+				if(defined $opts{"l"}) {
+					my $date=`date +%x`;
+					chomp($date);
+					foreach $uid (keys %users) {
+						my $command="/usr/sbin/usermod -s /bin/false -c \"id disabled by $REAL_USER on $date\" $uid";
+						if((my $err=run_command($command))) {
+							command_error($command,$err);
+						}
+					}
+				}
+			}
+		}
+	}
+} else {
+	print STDERR "ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n";
+	write_log("ERROR: Invalid argument or option, try $prgname -h : ".__LINE__."\n");
+	write_log("END $prgname\n");
+	exit 1;
+}
+
+if($errcode && defined $opts{"f"}) {
+	print STDERR "ERROR: Check output for ERRORS\n";
+	write_log("ERROR: Check output for ERRORS\n");
+}
+write_log("END $prgname\n");
+exit $errcode;

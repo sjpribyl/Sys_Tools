@@ -1,0 +1,16 @@
+2.0 changes
+* Sectool integration(includes migrating to new server)
+* Set password when adding user
+* add password reset to usrmod
+* add rolmod
+* Improve error reporting in usrmgr and grpmgr
+* Allow Multiple groups in grpmod to multiple users
+* Allow usrmod work like grpmod for secondary groups(?)
+* HP Support
+* Linux Support
+DONE fix grpmod primary/secondary group problem 
+DONE Improve error reporting in ds_suusrmgt
+DONE Fix check_uid and check_gid error in usrmgr and grpmgr whan adding new user/group
+DONE try to not select gecos fields that contain "disabled" and force gecos if not found.
+3.0 Changes
+* smart sorting and bulk changes in batch mode

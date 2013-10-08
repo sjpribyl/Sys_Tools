@@ -1,0 +1,67 @@
+# 
+#This File
+#
+README
+
+#
+#usrmgt change log
+#
+change.txt
+
+#
+#feature requests/project plan
+#
+request.txt
+
+#
+# User management back end scripts
+#
+# Set uid wrapper backend
+ds_suusrmgt.aix
+ds_suusrmgt.c
+ds_suusrmgt.sunos.i386
+ds_suusrmgt.sunos.sparc
+Makefile
+# Group Manager backend
+grpmgr
+grpmgr.1.0.0
+# User manager backend
+usrmgr
+usrmgr.1.0.0
+# Role manager backend
+rolmgr
+# Usermanagment install script
+install
+
+#
+# User Management front end scripts
+#
+# cli get uid/gid tools
+dsgetgid
+dsgetuid
+# usrmanagment scripts
+# Batch rever script
+usrmgt
+usrmgt.1.5.0
+#Group add
+grpadd -> /export/home/spr4h/usrmgt/usrmgt
+#user add
+usradd -> /export/home/spr4h/usrmgt/usrmgt
+#Role modify
+rolmod -> /export/home/spr4h/usrmgt/usrmgt
+#Group Modify
+grpmod -> /export/home/spr4h/usrmgt/usrmgt
+#User modify
+usrmod -> /export/home/spr4h/usrmgt/usrmgt
+#user password reset
+usrpwd -> /export/home/spr4h/usrmgt/usrmgt
+
+#
+# /etc/passwd and /etc/group processing script
+#
+pass.process1
+
+#
+# Perodic user cleanup script
+#
+usrclean

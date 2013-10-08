@@ -1,0 +1,68 @@
+#!/bin/bash 
+
+OUTFILE="/dev/null"
+
+while (( "$#" )); do
+	if [ "${1}" = "-f" ]; then
+		shift
+		OUTFILE=$1
+		if [ "x${OUTFILE}" == "x-" ]; then
+			OUTFILE="/dev/null"
+		fi
+		if [ -z $OUTFILE ]; then
+			OUTFILE="/var/www/Inventory/.reports/missing_inv.txt"
+		fi
+	fi
+	shift
+done
+
+success=0
+rm -f /tmp/host_list.txt
+if [ $? -ne 0 ]; then exit 1;fi
+
+wget -q http://uschi11sak00/Inventory/.reports/host_list.txt -O /tmp/host_list.txt
+if [ $? -ne 0 ]; then exit 1;fi
+
+for I in `cat /tmp/host_list.txt` 
+do
+	#/bin/echo -e "$I"  
+	if [[ $I != \.* ]]; then 
+                ping -c1 -W1 $I 1>/dev/null 2>&1
+		case $? in 
+		0|1)
+			ssh -n -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes $I uptime >/dev/null 2>&1
+			if [ $? -ne 0 ]; then 
+				missing=( "${missing[@]}" $I )
+			fi
+			;;
+	 	*) 	
+			nf=( "${nf[@]}" $I )
+			;;
+		esac
+	fi
+done
+
+rm -f /tmp/host_list.txt
+if [ $? -ne 0 ]; then exit 1;fi
+ 
+if [ ${#missing[@]} -gt 0 ]; then 
+	/bin/echo -e "\nServers not reachable,possibly down" 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+	/bin/echo  2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+	for (( i=0; i<${#missing[@]}; i++ ));
+	do
+		/bin/echo -e "\t${missing[$i]} " 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+	done
+	echo
+fi
+
+if [ ${#nf[@]} -gt 0 ]; then 
+	/bin/echo -e "\nServers no longer reachable" 2>&1 | /usr/bin/tee $OUTFILE 2>&1
+	 # use for loop read all nameservers
+	for (( i=0; i<${#nf[@]}; i++ ));
+	do
+		/bin/echo -e "\t${nf[$i]}" 2>&1 | /usr/bin/tee -a $OUTFILE  2>&1
+	done
+fi
+
+exit $success;
+# vim: ts=4  sw=4 autoindent

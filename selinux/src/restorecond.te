@@ -1,0 +1,14 @@
+module restorecond 1.0.0;
+
+require {
+      class sock_file write;
+      class unix_stream_socket connectto;
+      type restorecond_t;
+      type var_run_t;
+      type initrc_t;
+}
+
+#============= restorecond_t ==============
+allow restorecond_t var_run_t:sock_file write;
+allow restorecond_t initrc_t:unix_stream_socket connectto;
+

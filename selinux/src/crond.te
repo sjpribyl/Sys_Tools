@@ -1,0 +1,23 @@
+module crond 1.0.0;
+
+require {
+      class dir search;
+      class file read;
+	  class capability ipc_lock;
+	  class unix_stream_socket connectto;
+	  class sock_file write;
+      type crond_t;
+      type var_run_t;
+      type sysctl_crypto_t;
+      type unconfined_t;
+      type initrc_t;
+}
+
+#============= crond_t ==============
+allow crond_t self:capability ipc_lock;
+allow crond_t sysctl_crypto_t:dir search;
+allow crond_t sysctl_crypto_t:file read;
+
+allow crond_t unconfined_t:unix_stream_socket connectto;
+allow crond_t var_run_t:sock_file write;
+allow crond_t initrc_t:unix_stream_socket connectto;

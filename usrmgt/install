@@ -1,0 +1,27 @@
+#!/bin/ksh -x
+OS=`/usr/bin/uname`
+ARCH=`/usr/bin/uname -p`
+
+cd ~infosec/usrmgt
+
+/usr/bin/cp usrmgr /allstate/scripts/usrmgr
+chown infosec:security /allstate/scripts/usrmgr
+chmod 750 /allstate/scripts/usrmgr
+
+/usr/bin/cp grpmgr /allstate/scripts/grpmgr
+chown infosec:security /allstate/scripts/grpmgr
+chmod 750 /allstate/scripts/grpmgr
+
+/usr/bin/rm -f /allstate/scripts/ds_suusrtmgt
+if [ $OS == "AIX" ]; then 
+	/usr/bin/cp ds_suusrmgt.aix /allstate/scripts/ds_suusrmgt
+elif [ $OS == "SunOS" ];then 
+	if [ $ARCH == "sparc" ] ;then
+		/usr/bin/cp ds_suusrmgt.sunos.sparc /allstate/scripts/ds_suusrmgt
+	elif [ $ARCH == "i386" ] ;then
+		/usr/bin/cp ds_suusrmgt.sunos.i386 /allstate/scripts/ds_suusrmgt
+	fi
+fi
+chown root:security /allstate/scripts/ds_suusrmgt
+chmod 4755 /allstate/scripts/ds_suusrmgt
+/usr/bin/pdosobjsig -u /allstate/scripts/ds_suusrmgt -s trusted

@@ -1,0 +1,128 @@
+#!/usr/bin/python
+#
+# USAGE: $0 frequency minutes outputfile
+#
+# $Id: fmcapture,v 1.2 2005/08/25 06:07:52 jake Exp jake $
+# this script is for Linux
+# FreeBSD counterpart available at http://angerman.net
+
+__author__ = "Gary Burd"
+__copyright__ = "Copyright 2003, Gary Burd"
+__license__ = "GPL"
+__version__ = "0.2"
+
+import struct
+import os
+import fcntl
+import sys
+import time
+import signal
+from signal import SIGINT
+
+# where line-in resides
+DEV_AUDIO = '/dev/audio1'
+
+# need full path to sox for execv() later
+CAPTURE_CMD = '/usr/bin/sox -c2 -w -r32000 -tossdsp %s -t wav -r 44100 -w -c 2 -' % DEV_AUDIO
+#CAPTURE_CMD = '/usr/bin/sox -t ossdsp /dev/dsp -t .wav -r 44100 -c 2 -'
+#ENCODE_CMD = '/usr/local/bin/lame -S --quiet --silent --lowpass 15000 - -'
+
+#
+# Get arguments.
+#
+
+try:
+    frequency = float(sys.argv[1])
+    minutes = int(sys.argv[2]) * 60
+    path = sys.argv[3]
+except:
+    print '''Usage: %s frequency minutes output-path''' % sys.argv[0]
+    sys.exit(1)
+
+# Path can contain time.strftime inserts. 
+# Example: /mp3s/cartalk/%Y-%m-%d
+
+path = time.strftime(path)
+
+# 
+# Tune the radio
+#
+
+# constants from linux/videodev.h
+VIDIOCGTUNER = 0xc0347604
+VIDIOCGAUDIO = 0x80287610
+VIDIOCSAUDIO = 0x40287611
+VIDIOCSFREQ =  0x4004760f
+VIDEO_AUDIO_MUTE = 1
+VIDEO_TUNER_LOW =  8
+
+# open the radio device
+radio_fd = os.open('/dev/radio', os.O_RDONLY)
+
+# detect kilohertz or megahertz
+# MENTAL VIOLENCE: negate ioctl to workaround overflow bug in Python 2.4
+video_tuner = fcntl.ioctl(radio_fd, ~int(~VIDIOCGTUNER & 0xFFFFFFFF), struct.pack("52x"))
+tuner, name, rangelow, rangehigh, vtflags, mode, signal = struct.unpack("i 32s I I I H H", video_tuner)
+if vtflags & VIDEO_TUNER_LOW:
+    multiplier = 16000
+else:
+    multiplier = 16
+
+# tune frequency
+fcntl.ioctl(radio_fd, VIDIOCSFREQ, struct.pack("I", int(frequency * multiplier)))
+
+# unmute
+# MENTAL VIOLENCE: negate ioctl to workaround overflow bug in Python 2.4
+video_audio = fcntl.ioctl(radio_fd, ~int(~VIDIOCGAUDIO & 0xFFFFFFFF), struct.pack("40x"))
+audio, volume, bass, treble, vaflags, vaname, vamode, balance, step = struct.unpack("i H H H 2x I 16s H H H 2x", video_audio)
+vaflags = vaflags & ~VIDEO_AUDIO_MUTE
+video_audio = struct.pack("i H H H 2x I 16x H H H 2x", 0, volume, bass, treble, vaflags, vamode, balance, step)
+fcntl.ioctl(radio_fd, VIDIOCSAUDIO, video_audio)
+
+#
+# Capture the uncompressed sound
+#
+
+uncompressed_file = open(path, 'wb');
+
+try:
+    pid = os.fork()
+    if pid == 0:
+        os.dup2(uncompressed_file.fileno(), 1)
+        uncompressed_file.close()
+        args = CAPTURE_CMD.split()
+        os.execv(args[0], args)
+
+    time.sleep(minutes)
+
+finally:
+    os.kill(pid, SIGINT)
+    os.wait()
+
+    # mute
+    vaflags = vaflags | VIDEO_AUDIO_MUTE
+    video_audio = struct.pack("i H H H 2x I 16x H H H 2x", 0, volume, bass, treble, vaflags, vamode, balance, step)
+    fcntl.ioctl(radio_fd, VIDIOCSAUDIO, video_audio)
+
+    # close
+    os.close(radio_fd)  
+
+#
+# Compress the temporay file.
+#
+#
+#uncompressed_file.seek(0)
+#compressed_file = open(path, 'wb')
+#
+#os.dup2(uncompressed_file.fileno(), 0)
+#os.dup2(compressed_file.fileno(), 1)
+#
+#uncompressed_file.close()
+#compressed_file.close()
+#
+#os.nice(10)
+#
+# Set TERM environment variable to keep lame quiet.
+#
+#args = ENCODE_CMD.split()
+#os.execve(args[0], args, { 'TERM': 'dumb' })

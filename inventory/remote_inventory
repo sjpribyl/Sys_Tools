@@ -1,0 +1,16 @@
+#/bin/bash
+STATUS=0
+for I in  uschi12ftp01
+do
+	echo "Fetching inventory for $I"
+	rsync -av $I:/var/lib/inventory/ /var/www/Inventory/$I
+	if [ $? -ne 0 ]; then 
+		STATUS=1; 
+		echo FAILURE
+	else
+		echo SUCCESS
+	fi
+	echo 
+done 
+
+exit ${STATUS}

@@ -1,0 +1,11 @@
+module snmp_l 1.0.0;
+
+require {
+      class capability setgid;
+      class capability setuid;
+      type snmpd_t;
+}
+
+#============= snmpd_t ==============
+allow snmpd_t self:capability setgid;
+allow snmpd_t self:capability setuid;

@@ -1,0 +1,38 @@
+module nrpe 1.0.0;
+
+require {
+	  class dir getattr;
+	  class dir read;
+	  class dir search;
+	  class file read;
+	  class file open;
+	  class file getattr;
+	  class chr_file read;
+	  class capability ipc_lock;
+      type nrpe_t;
+      type sysfs_t;
+      type tmpfs_t;
+      type devpts_t;
+      type nagios_checkdisk_plugin_t;
+      type nagios_etc_t;
+      type user_home_dir_t;
+      type etc_t;
+      type random_device_t;
+      type sysctl_crypto_t;
+}
+
+#============= nagios_checkdisk_plugin_t ==============
+allow nagios_checkdisk_plugin_t sysfs_t:dir getattr;
+allow nagios_checkdisk_plugin_t tmpfs_t:dir getattr;
+allow nagios_checkdisk_plugin_t devpts_t:dir getattr;
+allow nagios_checkdisk_plugin_t etc_t:file { read open getattr };
+
+#============= nrpe_t ==============
+allow nrpe_t nagios_etc_t:dir read;
+allow nrpe_t user_home_dir_t:dir getattr;
+allow nrpe_t random_device_t:chr_file read;
+allow nrpe_t sysctl_crypto_t:dir search;
+allow nrpe_t self:capability ipc_lock;
+allow nrpe_t sysctl_crypto_t:file read;
+
+

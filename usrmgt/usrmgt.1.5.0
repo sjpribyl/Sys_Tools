@@ -1,0 +1,1387 @@
+#!/usr/bin/perl 
+#   print "YOU ARE HERE ".__FILE__.":".__LINE__."\n";
+###############################################################################
+#WISH LIST
+#
+#  Script Name : usrmgt
+#
+#  Description : Wrapper Script to manage users
+#
+#  Unit    : AIS UNIX
+#
+###############################################################################
+#
+#  Date    Programmer         Description
+#  --------  ------------       -------------------------------
+#  1/28/2008  Steve Pribyl       Creation
+#  04/21/2009 Steve Pribyl
+#  		Usrmgt added batch processing for user lock and remove user from group.
+#  		Allow comma delimited list of hosts or host file.
+#  		Added -V to get the version
+#  		Prefech gecos field on usradd and usrmod
+#  		Allow all users to specify password on password change.
+#  		Default shell to /bin/ksh
+#  		DISABLED usrmod change home directory until backend problem can be fixed.
+#  		Remove secondary groups from usrmod
+#  		Update code to remember details of previously allocated users and groups.
+#  		Added host ALL for all hosts.
+#
+#
+###############################################################################
+$|=1; # Do out buffering
+
+use strict;
+use warnings;
+use POSIX ":sys_wait_h";
+use File::Temp qw/ :mktemp  /;
+use File::Spec;
+use Getopt::Std;
+use Fcntl ':flock'; # import LOCK_* constants
+use File::Copy;
+use FileHandle;
+
+$SIG{CHLD} = \&REAPER;  #Catch sig child and process the results
+
+###### 
+#
+# Tuning variables
+#
+######
+my $MAX_PROC=10;   # Maximum concurant processes to allow.
+my $UPDATE_RATE=5; # Rate a which to update running status
+my $MAX_LIFE=120;  # Time to allow a process to run
+my $BASE_PATH="/allstate"; 
+my $LOG_PREFIX="/allstate/log"; 
+#my $LOG_PREFIX="/export/home/spr4h/tmp"; 
+#print "*****************\n";
+#print "**** WARNING **** log prefix is $LOG_PREFIX\n";
+#print "*****************\n";
+my $REAL_USER=getlogin() ? getlogin() : "unknown";
+my $USRMGR=$BASE_PATH."/scripts/usrmgr -O $REAL_USER";
+my $GRPMGR=$BASE_PATH."/scripts/grpmgr -O $REAL_USER";
+my $BLACKLIST="/net/ho-0001-nas16p/EIAIS001/prod/usrmgt_blacklist";
+my $MASTERLIST="/net/ho-0001-nas16p/EIAIS001/prod/Data/dsacct.aisbox";
+my $UID_LOCK_FILE="$LOG_PREFIX/.dsuid.lock";
+my $UID_LOCK;
+my $GID_LOCK_FILE="$LOG_PREFIX/.dsgid.lock";
+my $GID_LOCK;
+
+#####
+#
+# Global variables
+#
+#####
+my %Kid_status;    #list of running processes
+my %Kid_list;	   #list of processes started
+my $junk; my $progname;
+($junk,$junk,$progname) = File::Spec->splitpath( $0 );
+my @cmd_list; # Array of command records(HOSTS_FILE,COMMAND,RESULT)
+my %opts; # CLI OPTIONS
+my $detail_opened=0;
+my $summary_opened=0;
+my %blacklist;
+my $SECURITY=0;
+my $TESTMODE=0;
+
+#
+# A simple reaper for child processes
+#
+sub REAPER {
+	my $child;
+	while ($child = waitpid(-1,WNOHANG)) {
+		if($child==-1) {last;}
+		my $status=$?;
+		$Kid_status{$child} = { STATUS=>$status<=256?$status:($status/256), TIME=>time()};
+		#print "Child $child reaped\n";
+	}
+}
+
+
+#
+# Print messages
+#
+sub print_message($$$$) {
+	my ($msg,$std,$sum,$det)=@_; 
+	if($std) {
+		print $msg;
+	}
+	if($sum && $summary_opened) {
+		print SUMMARY $msg;
+	}
+	if($det && $detail_opened ) {
+		print DETAIL $msg;
+	}
+}
+
+sub exit_code($$)
+{
+	my ($msg,$code)=@_;
+	print_message($msg,1,1,1);
+	if($code !=0) {
+		print_message("Exiting Program\n",1,1,1);
+	}
+	exit($code);
+}
+
+#
+# Fork a process and add it to the process list.
+#
+sub create_process($$) {
+    my ($command,$host)=@_;
+	my $name = mktemp( "/tmp/$progname.XXXXX").".log";
+	my $time=int(rand(5))+1;
+
+	if (defined $blacklist{$host}) {
+        $Kid_list{$host} = {
+                        TIME => time(),
+                        STATE => 0,
+                        STATUS => 0,
+                        FILE => "BLACKLIST",
+                        HOST => $host,
+                    };
+        $Kid_status{$host} = {STATUS=>1, TIME=>time()};
+	} elsif($TESTMODE) { #TEST MODE
+		$Kid_list{$host} = {
+						TIME => time(),
+						STATE => 0,
+						STATUS => 0,
+						FILE => $name,
+						HOST => $host,
+					};
+		$Kid_status{$host} = {STATUS=>0, TIME=>time()};
+	} else {
+		my $pid = fork();
+		if (!defined($pid)) { #BROKEN
+			exit_code("BROKEN FORK: $!\n",1);
+		} elsif ($pid==0) { #CHILD
+			open(STDERR,">".$name);
+			open(STDOUT,">".$name);
+print "HOST=\'$host\'\n";
+			exec {'/usr/bin/ssh'} 'USRMGT','-n','-T',$host,'-o','PreferredAuthentications=publickey','-o','ConnectionAttempts=5','--','/allstate/scripts/ds_suusrmgt',$command;
+			#exec {'/usr/bin/ssh'} 'USRMGT','-n','-T',$host,'-o','PreferredAuthentications=publickey','-o','ConnectionAttempts=5','--','/usr/local/bin/sudo',$command;
+			exit 1;
+		} else { #PARENT
+			;#NOTHING
+		}
+		$Kid_list{$pid} = {
+						TIME => time(),
+						STATE => 0,
+						STATUS => 0,
+						FILE => $name,
+						HOST => $host,
+					};
+	}
+}
+
+sub run_job ($$) {
+	my ($host_file,$command)=@_;
+	my $done=0,my $cnt=0;
+	my $UPDATE=$UPDATE_RATE+1;
+	my $started=0;
+	my $read=0;
+	my $cmd_errors=0;
+	my $host_cnt=0;
+	my @host_list;
+
+	#COUNT HOSTS
+
+	print_message("Running command\n\t \"".$command."\"\n",1,1,1);
+	$host_file=$MASTERLIST if ($host_file eq "ALL");
+	if(-f $host_file && -r $host_file) {
+		$host_file=File::Spec->rel2abs($host_file);
+		if(!open HOSTS, "<".$host_file) {
+			print_message("Can't open host file \"$host_file\": $!",1,1,1);return 1;
+		}
+		while(<HOSTS>) {
+			chomp;
+			my($host,$last)=split(/#/);
+			$host =~ s/\s+//g;
+			if(!length($host)) {
+				next;
+			}
+			$host_list[$host_cnt++]=$host;
+		}
+		close HOSTS;
+		print_message("On hosts in file\n\t \"".$host_file."\"\n\n",1,1,1);
+	} else {
+		@host_list=split(/,/,$host_file);
+		$host_cnt=$#host_list+1;
+		print_message("On hosts in list\n\t \"".$host_file."\"\n\n",1,1,1);
+	}
+
+	#Process the file and run the command
+	while ($read<$host_cnt || $done<$started) {  #Do this in file the all host processed and all processes finished
+		#
+		# Start some processes
+		#
+		while($cnt<$MAX_PROC && $read<$host_cnt) {
+			create_process($command,$host_list[$read++]);
+			$cnt++;
+			$started++;
+		}
+
+		if($UPDATE>$UPDATE_RATE) { 
+			print_message("Completed: ".((($done*100)/$host_cnt)%100)."% - ".($host_cnt-$done)." remaining.\n",1,0,0);
+		}
+
+		#
+		# Update running status
+		#
+		foreach my $pid (keys(%Kid_list)) {
+			if($Kid_list{$pid}{STATE}==0) {  #if the pid marked as running
+				if(defined($Kid_status{$pid})) { #Check if the pid is in the exit queue
+					$Kid_list{$pid}{STATE}=1; # mark it as complete
+					$Kid_list{$pid}{TIME}=$Kid_status{$pid}{TIME}-$Kid_list{$pid}{TIME}; #calculate the run time
+					$Kid_list{$pid}{STATUS}=$Kid_status{$pid}{STATUS}; #Save the status
+
+					#
+					#WRITE TO LOG FILES
+					#
+					print_message("##### ",0,0,1);
+					print_message($Kid_list{$pid}{HOST},0,1,1);
+					print_message(" #####\n",0,0,1);
+					print_message(":",0,1,0);
+					if($Kid_list{$pid}{STATUS}) {
+						print_message("Failed Exit Code=".($Kid_list{$pid}{STATUS}>>8).":".($Kid_list{$pid}{STATUS}&127),0,1,1);
+						$cmd_errors++;
+					} else  {
+						print_message("Success",0,1,1);
+					}
+
+					print_message(" - $Kid_list{$pid}{TIME} seconds\n",0,0,1);
+					print_message("\n",0,1,1);
+
+					print_message("***Log Start***\n",0,0,1);
+					if(defined $blacklist{$Kid_list{$pid}{HOST}}) {
+						print_message("BLACKLISTED ".$blacklist{$Kid_list{$pid}{HOST}}."\n",0,0,1);
+					} else {
+						if(!$TESTMODE) {
+							if(!open LOGFILE, "<".$Kid_list{$pid}{FILE}) {
+								print_message("Can't open log file \"$Kid_list{$pid}{FILE}\": $!\n",0,1,1);
+							} else { 
+								while(<LOGFILE>) {
+									print_message($_,0,0,1);
+								}
+								close LOGFILE;
+							}
+							#Delete the log file
+							if(!unlink($Kid_list{$pid}{FILE})) {
+								print_message("Unable to remove $Kid_list{$pid}{FILE}: $!\n",0,1,1);
+							}
+						} else {
+							print_message("No Log in test mode\n",0,0,1);
+						}
+					}
+					print_message("***Log End***\n\n",0,0,1);
+
+					#Clear the status record.
+					delete($Kid_status{$pid});
+					$done++;
+					$cnt--;
+				}
+			}
+		}
+		#
+		# Kill long running pids
+		#
+		foreach my $pid (keys(%Kid_list)) {
+			if($Kid_list{$pid}{STATE}==0) {  #if the pid marked as running
+				#if($UPDATE>$UPDATE_RATE) { 
+				#	print_message("\t$pid = running:".(time()-$Kid_list{$pid}{TIME})." seconds\n",1,0,0);
+				#}
+				if(time()-$Kid_list{$pid}{TIME}>$MAX_LIFE) {
+					if(!open LOGFILE, ">>".$Kid_list{$pid}{FILE}) {
+						print_message("Can't open log file \"$Kid_list{$pid}{FILE}\": $!\n",0,1,1);
+					} else { 
+						print LOGFILE "Killing host $Kid_list{$pid}{HOST}, TIMEOUT\n";
+						close LOGFILE;
+					}
+					print_message("Killing host $Kid_list{$pid}{HOST}, TIMEOUT\n",0,1,0);
+					kill 9,$pid;
+				} 
+			} 
+		}
+		if($UPDATE>$UPDATE_RATE) { 
+			$UPDATE=0;
+		}
+		$UPDATE++;
+		sleep 1;
+	}
+	return $cmd_errors;
+}
+
+sub get_input() 
+{
+	my $input;
+	my $null;
+	chomp ($input = <>);
+	#$input =~ /(.+)/;
+	if(length($input)>0) {
+		return $input;
+	} 
+	return $null; #Return an undef var to show we read nothing.
+}
+
+sub validate_host_list($) 
+{
+	my ($host_file)=@_;
+	return 1 if($host_file eq "ALL");
+	if(-f $host_file && -r $host_file) {
+		return 1;
+	} else {
+		my $failed=0;
+		foreach (split(/,/,$host_file)) {
+			if(!gethostbyname($_)) {
+				$failed=1;
+			}
+		}
+		return 1 if(!$failed);
+	}
+	return 0;
+}
+
+sub get_host_list() 
+{
+	my $host_file;
+	while(1) {
+		print "What is the name of the host file or the list of hosts? ";
+		$host_file = get_input();
+		if(defined $host_file) {
+		$host_file=~s/\s+//g; # Strip all spaces
+			if (defined $host_file) {
+				last if(validate_host_list($host_file));
+			}
+		}
+		print "**Invalid file or host list.\n";
+	}
+	return $host_file;
+}
+
+sub process_batch_file($) 
+{
+	my ($batch_file) =@_;
+	if(open BATCHFILE,$batch_file) {
+		my $lcnt;
+		while(<BATCHFILE>) {
+			chomp();
+			$lcnt++;
+			my @args=split(/:/);
+			if($args[0] eq "user-l") {
+				#CMD,<USER>,<FILELIST>
+				$args[2]=~s/\s+//g; # Strip all spaces
+				if(!validate_host_list($args[2])) {
+					print_message("ERROR: Invalid Host File or Host List at line $lcnt \n",1,1,1);
+					next;
+				}
+				add_usrpwd_command($args[1],"l","",$args[2]);
+			} elsif($args[0] eq "group-ru") {
+				#CMD,<GROUP>,<USER>,<FILELIST>
+				if(!validate_host_list($args[3])) {
+					print_message("ERROR: Invalid Host File or Host List at line $lcnt\n",1,1,1);
+					next;
+				}
+				add_grpmod_command($args[1],$args[2],"r",$args[3]);
+			} else {
+				print_message("ERROR: Invalid batch command argument at line $lcnt\n",1,1,1);
+			}
+		}
+	} else {
+		print_message("ERROR: Invalid batch file : $!\n",1,1,1);
+	}
+}
+
+sub get_usrmgt_opts()
+{
+	my ($batch_file);
+	if($#ARGV<0) {
+		while(1) {
+			print "What is the name of the batch file? ";
+			$batch_file = get_input();
+			if (defined $batch_file && -f $batch_file && -r $batch_file) {
+				last;
+			} 
+			print "Invalid file: Can't read from \"$batch_file\".\n";
+		}
+	} else {
+		if(!getopts('hyTB:',\%opts) || $#ARGV>=0) {
+			exit_code("ERROR: Invalid argument or option, try $progname -h\n",1);
+		}
+		if(defined $opts{"h"}) { # Print Help
+			print "$progname:\n";
+			print "Description:\n";
+			print "\tProcess a batch file\n";
+			print "Options:\n";
+			print "\tMenu Mode - No options\n";
+			print "\t-h\t\t\t- This page\n";
+			print "\t-V\t\t\t- Get Version and exit\n";
+			print "\t-T\t\t\t- Run in test mode\n";
+			print "\t-B <batch file>\n";
+			print "\n\tFile format:\n";
+			print "\tTo lock a user\n";
+			print "\t\tuser-l:<UNAME>:<hostfile>|<hostlist>|ALL\n";
+			print "\tTo remove a user from group\n";
+			print "\t\tgroup-ru:<GROUP>:<UNAME>:<hostfile>|<hostlist>|ALL\n";
+			print "\n";
+			exit 0;
+		} if(defined $opts{"B"}) {
+			$batch_file=$opts{"B"};
+		} else {
+			exit_code("ERROR: -B requires name of batch file\n",1);
+		}
+	}
+	process_batch_file($batch_file);
+}
+
+sub	add_usradd_command($$$$$$$$) 
+{
+	my ($uname,$gecos,$dir,$uid,$shell,$group,$groups,$host_file)=@_;
+
+	my $cmd=$USRMGR." -a -c '$gecos' -u $uid";
+	if(defined $dir) {
+		$cmd.=" -d $dir";
+	}
+	if(defined $shell) {
+		$cmd.=" -s $shell";
+	}
+	if(defined $group) {
+		$cmd.=" -g $group";
+	}
+	if(defined $groups) {
+		$cmd.=" -G $groups";
+	}
+	$cmd.=" $uname";
+
+	push(@cmd_list,
+		{
+		HOSTS_FILE =>$host_file,
+		COMMAND=>$cmd,
+		RESULT=>0,}
+		);
+}
+
+sub save_new_uid($)
+{
+	my ($data)=@_;
+	my $nextuid=$data->{NEW}+1;
+	open OUTPUT,">$LOG_PREFIX/dsuid3.log" or die "ERROR***** Can't open $LOG_PREFIX/dsuid3.log. Contact AIS:$!\n";   # Add to new allocated
+	print OUTPUT "nextuid:$nextuid\n";
+	close OUTPUT;
+	copy("$LOG_PREFIX/dsuid3.log","$LOG_PREFIX/dsuid2.log");
+	unlink("$LOG_PREFIX/dsuid3.log");
+	open OUTPUT,">>$LOG_PREFIX/dsnewuid.log" or die "ERROR***** Can't open $LOG_PREFIX/dsnewuid.log. Contact AIS:$!\n";   # Add to new allocated
+	print OUTPUT $data->{UNAME}." ".$data->{UID}." <GID> <HOST> ".$data->{GECOS}."\n";   # Add to new allocated file
+	close OUTPUT;
+	close($UID_LOCK);
+}
+
+
+sub generate_uid($)
+{
+	my ($uname)=@_;
+	my $uid;
+	my %uids;
+	my %names;
+	my $data;
+
+	if ( ! -f "$LOG_PREFIX/dsuid.log" ) {      ### check for uid file
+	   exit_code("ERROR**** $LOG_PREFIX/dsuid.log not found.  Contact AIS :$! \n",1);
+	}
+	if ( ! -f "$LOG_PREFIX/dsuid2.log" ) {     ### check for nextuid file
+	   exit_code("ERROR**** $LOG_PREFIX/dsuid2.log not found.  Contact AIS :$! \n",1);
+	}
+
+	#Lock the file so no one else can make changes
+	open $UID_LOCK,">",$UID_LOCK_FILE or die "ERROR: Could open lock $UID_LOCK_FILE: $!\n";
+	$UID_LOCK->autoflush(1);
+	flock($UID_LOCK,LOCK_EX);
+	print $UID_LOCK "$0 $$\n";
+
+	my $found=0;
+	open INPUT,"<","$LOG_PREFIX/dsuid.log" or die "ERROR***** Can't open $LOG_PREFIX/dsuid.log.  Contact AIS:$!\n";
+	while(my $line=<INPUT>) {
+		if($line =~/^$uname /) {
+			$found=1;
+			chomp $line;
+			my ($name, $id, $gid, $host,$gecos) = split(/ /,$line,5);
+			if ($name eq $uname) {
+				$uids{$id}++;
+				$names{$id}=$gecos if defined $gecos;
+			}
+		}
+	}
+	close INPUT;
+
+	if ( !$found && -f "$LOG_PREFIX/dsnewuid.log" ) {             ### check for newuid file
+		open INPUT,"$LOG_PREFIX/dsnewuid.log" or die "ERROR***** Can't open $LOG_PREFIX/dsnewuid.log. Contact AIS:$!\n";
+		while(my $line=<INPUT>) {
+			if($line=~/^$uname /) {
+				$found=1;
+				chomp $line;
+				my ($name, $id, $gid, $host,$gecos) = split(/ /,$line,5);
+				if ($name eq $uname) {
+					$uids{$id}++;
+					$names{$id}=$gecos if defined $gecos;
+				}
+			}
+		}
+		close INPUT;
+	}
+
+	if(!$found) {
+		open INPUT,"<$LOG_PREFIX/dsuid2.log" or die "ERROR***** Can't open $LOG_PREFIX/dsuid2.log. Contact AIS:$!\n";   # Open dsuid2
+		my $line=<INPUT>;
+		chomp($line);
+		close INPUT;
+		my ($text,$nextuid)=split(":",$line);
+		$uid=$nextuid;
+	}
+	if(!defined $uid) { #UID was found in the files
+		foreach my $id (keys(%uids)) {
+			if(!defined $uid || $uids{$id}>$uids{$uid}) { # Find the first uid with the most hits
+				$uid=$id;
+				$data={UNAME=>$uname,UID=>$uid,GECOS=>$names{$uid},NEW=>0};
+			}
+		}
+		close($UID_LOCK); #release the lock
+	} else { # created a new uid
+		$data={UNAME=>$uname,UID=>$uid,NEW=>$uid};
+		#save_new_uid will unlock the file later
+	}
+	return $data;
+}
+
+sub get_usradd_opts() 
+{
+	my ($uname,$gecos,$dir,$uid,$shell,$group,$groups,$host_file);
+	my $data;
+	if($#ARGV<0) {
+		while(!defined $uname) {
+			print "What is the uname of the user(required)? ";
+			$uname=get_input();
+			$uname =~ s/\s+//g; #strip white space
+		}
+		$data=generate_uid($uname);
+		$uid=$data->{UID};
+		while(1) {
+			print "What is the full name of the user";
+			if (defined $data->{GECOS}) { 
+				print "[$data->{GECOS}] ";
+			}
+			print "(required)? ";
+			$gecos=<>;
+			chomp($gecos);
+			if(length($gecos)) {
+				last;
+			} else {
+				if (defined $data->{GECOS}) {
+					$gecos=$data->{GECOS};
+					last;
+				}
+			}
+		}
+		$data->{GECOS}=$gecos;
+		print "What is the home directory of the user(optional)? ";
+		$dir=get_input();
+		if(!defined $uid) {
+			print "ERROR: Unable to generate UID for $uname!!\n";
+			exit 1;
+		}
+		print "What is the shell of the user[/bin/ksh](optional)? ";
+		$shell=get_input();
+		if(!defined($shell)) {
+			$shell="/bin/ksh";
+		}
+		print "What is the primary group of the user(optional)? ";
+		$group=get_input();
+		#TODO VALIDATE GROUP?
+		print "What are the secondary groups of the user(optional)? ";
+		$groups=get_input();
+		#TODO VALIDATE GROUPS?
+		$host_file=get_host_list();
+	} else {
+		if(!getopts('hyTU:c:d:s:g:G:f:H:',\%opts) || $#ARGV>=0) {
+			exit_code("ERROR: Invalid argument or option, try $progname -h\n",1);
+		}
+		if(defined $opts{"h"}) { # Print Help
+			print "$progname:\n";
+			print "Description:\n";
+			print "\tAdd a user to a given list of nodes\n";
+			print "Options:\n";
+			print "\tMenu Mode - No options\n";
+			print "\t-h\t\t\t- This page\n";
+			print "\t-V\t\t\t- Get Version and exit\n";
+			print "\t-T\t\t\t- Run in test mode\n";
+			print "\t-U <uname>\t\t- User name (required)\n";
+			print "\t-c <gecos>\t\t- Users full name(required)\n";
+			print "\t-d <dir path>\t\t- Users home directory(optional)\n";
+			#print "\t-u <uid>\t\t- Users uid (optional)\n";
+			print "\t-s <shell>\t\t- Path to users shell(optional)\n";
+			print "\t-g <group>\t\t- Users primary group(optional)\n";
+			print "\t-G <grouplist>\t\t- List of secondary group(optional)\n";
+			print "\t-f <file>|ALL\t\t- File containing list of hosts\n";
+			print "\t-H <hostlist>|ALL\t- Comma delimited  list of hosts\n";
+			print "\t\t\t\t  ALL = all hosts\n";
+			print "\t\t\t\t  Switch -f or -H required\n";
+			print "\t-y\t\t\t- don't confirm options\n";
+			print "\n";
+			exit 1;
+		} 
+		if(defined $opts{"U"}) {
+			$uname=$opts{"U"};
+		} else {
+			exit_code("ERROR: -U <uname> is required\n",1);
+		}
+		$uname =~ s/\s+//g; #strip white space
+		$data=generate_uid($uname);
+		$uid=$data->{UID};
+		if(defined $opts{"c"}) {
+			$gecos=$opts{"c"};
+		} else {
+			if (defined $data->{GECOS}) { 
+				$gecos=$data->{GECOS};
+			} else {
+				exit_code("ERROR: -c <gecos> is required\n",1);
+			}
+		}
+		$data->{GECOS}=$gecos;
+		if(defined $opts{"d"}) {
+			$dir=$opts{"d"};
+		} 
+		#if(defined $opts{"u"}) {
+		#	$uid=$opts{"u"};
+		#} 
+		if(!defined $uid) {
+			print "ERROR: Unable to generate UID for $uname!!\n"; #TODO THIS WILL NOT WORK IN BATCH MODE
+			exit 1;
+		}
+		if(defined $opts{"s"}) {
+			$shell=$opts{"s"};
+		} else { 
+			$shell="/bin/ksh";
+		}
+		if(defined $opts{"g"}) {
+			$group=$opts{"g"};
+		} 
+		if(defined $opts{"G"}) {
+			$groups=$opts{"G"};
+		} 
+		if(defined $opts{"f"} || defined $opts{"H"}) {
+			if(defined $opts{"f"}) {
+				$host_file=$opts{"f"};
+			} elsif(defined $opts{"H"}) {
+				$host_file=$opts{"H"};
+			}
+			if(!validate_host_list($host_file)) {
+				exit_code("ERROR: Invalid Host File or Host List\n",1); #TODO THIS WILL NOT WORK IN BATCH MODE
+			}
+		} else {
+			exit_code("ERROR: -f <host_file> or -H <hostlist> is required\n",1); #TODO THIS WILL NOT WORK IN BATCH MODE
+		}
+	}
+	while(!defined $opts{"y"}) {
+		my $input;
+		print "Add user:\n"; 
+		print "\tuname: \"$uname\"\n"; 
+		print "\tgecos: \"$gecos\"\n" if (defined $gecos);
+		print "\tdir: \"$dir\"\n" if (defined $dir);
+		print "\tuid: \"$uid\"\n" if (defined $uid);
+		print "\tshell: \"$shell\"\n" if (defined $shell);
+		print "\tprimary group: \"$group\"\n" if (defined $group);
+		print "\tsecondary groups: \"$groups\"\n" if (defined $groups);
+		print "\thost list: \"$host_file\"\n" if (defined $host_file);
+		print "\t***TESTMODE***\n" if ($TESTMODE);
+		print "Please verify (y/n)?";
+		$input = get_input();
+		last if(defined $input && $input eq "y");
+		exit 0 if(defined $input && $input eq "n");
+	}
+	add_usradd_command($uname,$gecos,$dir,$uid,$shell,$group,$groups,$host_file);
+	if($data->{NEW}!=0) {
+		save_new_uid($data);
+	}
+}
+
+sub add_usrmod_command($$$$$$$) 
+{
+    my ($uname,$gecos,$dir,$shell,$group,$groups,$host_file)=@_;
+    my $cmd=$USRMGR." -m";
+    if(defined $gecos) {
+        $cmd.=" -c \"$gecos\"";
+    }
+	#if(defined $dir) {
+	#	$cmd.=" -d $dir";
+	#}
+    if(defined $shell) {
+        $cmd.=" -s $shell";
+    }
+    if(defined $group) {
+        $cmd.=" -g $group";
+    }
+    if(defined $groups) {
+        $cmd.=" -G $groups";
+    }
+    $cmd.=" $uname";
+
+    push(@cmd_list,
+        {
+        HOSTS_FILE =>$host_file,
+        COMMAND=>$cmd,
+        RESULT=>0,}
+        );
+}
+
+sub get_usrmod_opts()
+{
+	my ($uname,$gecos,$dir,$shell,$group,$groups,$host_file);
+	if($#ARGV<0) {
+		while(!defined $uname) {
+			print "What is the uname of the user(required)? ";
+			$uname=get_input();
+		}
+		print "What is the full name of the user(optional)? ";
+		$gecos = get_input();
+		#print "What is the home directory of the user(optional)? ";
+		#print "\n";#$dir=get_input();
+		print "What is the shell of the user(optional)? ";
+		$shell = get_input();
+		print "What is the primary group of the user(optional)? ";
+		$group = get_input();
+		if($SECURITY) {
+			print "What are the secondary groups of the user(optional)? ";
+			$groups = get_input();
+		}
+		$host_file=get_host_list();
+	} else {
+		if(($SECURITY && !getopts('hyTU:c:s:d:g:G:f:H:',\%opts))  
+			|| (!$SECURITY && !getopts('hyTU:c:s:d:g:f:H:',\%opts)) || $#ARGV>=0) {
+			exit_code("ERROR: Invalid argument or option, try $progname -h\n",1);
+		}
+		if(defined $opts{"h"}) { # Print Help
+			print "$progname:\n";
+			print "Description:\n";
+			print "\tModify a users info on a given list of nodes\n";
+			print "Options:\n";
+			print "\tMenu Mode - No options\n";
+			print "\t-h\t\t\t- This page\n";
+			print "\t-V\t\t\t- Get Version and exit\n";
+			print "\t-T\t\t\t- Run in test mode\n";
+			print "\t-U <uname>\t\t- User name (required)\n";
+			print "\t-c <gecos>\t\t- Users full name(optional)\n";
+			#print "\t-d <dir path>\t\t- Users home directory(optional)\n";
+			print "\t-s <shell>\t\t- Path to users shell(optional)\n";
+			print "\t-g <group>\t\t- Users primary group(optional)\n";
+			if($SECURITY) {
+				print "\t-G <grouplist>\t\t- List of secondary group(optional)\n";
+			}
+			print "\t-f <file>|ALL\t\t- File containing list of hosts\n";
+			print "\t-H <hostlist>|ALL\t- Comma delimited  list of hosts\n";
+			print "\t\t\t\t  Switch -f or -H required\n";
+			print "\t\t\t\t  ALL = all hosts\n";
+			print "\t-y\t\t\t- don't confirm options\n";
+			print "\n";
+			exit 1;
+		} 
+		if(defined $opts{"U"}) {
+			$uname=$opts{"U"};
+		} else {
+			exit_code("ERROR: -U <uname> is required\n",1);
+		} 
+		if(defined $opts{"c"}) {
+			$gecos=$opts{"c"};
+		} 
+		#if(defined $opts{"d"}) {
+		#	$dir=$opts{"d"};
+		#} 
+		if(defined $opts{"s"}) {
+			$shell=$opts{"s"};
+		} 
+		if(defined $opts{"g"}) {
+			$group=$opts{"g"};
+		} 
+		if($SECURITY && defined $opts{"G"}) {
+			$groups=$opts{"G"};
+		} 
+		if(defined $opts{"f"} || defined $opts{"H"}) {
+			if(defined $opts{"f"}) {
+				$host_file=$opts{"f"};
+			} elsif(defined $opts{"H"}) {
+				$host_file=$opts{"H"};
+			}
+			if(!validate_host_list($host_file)) {
+				exit_code("ERROR: Invalid Host File or Host List\n",1); 
+			}
+		} else {
+			exit_code("ERROR: -f <host_file> or -H <hostlist> is required\n",1); 
+		}
+	}
+	while(!defined $opts{"y"}) {
+		my $input;
+		print "Modify user:\n";
+		print "\tuname: \"$uname\"\n";
+		print "\tgecos: \"$gecos\"\n" if (defined $gecos);
+		print "\tshell: \"$shell\"\n" if (defined $shell);
+		print "\tdir: \"$dir\"\n" if (defined $dir);
+		print "\tprimary group: \"$group\"\n" if (defined $group);
+		print "\tsecondary groups: \"$groups\"\n" if (defined $groups);
+		print "\thost list: \"$host_file\"\n" if (defined $host_file);
+		print "\t***TESTMODE***\n" if ($TESTMODE);
+		print "Please verify (y/n)?";
+		$input = get_input();
+		last if(defined $input && $input eq "y");
+		exit 0 if(defined $input && $input eq "n");
+	}
+    add_usrmod_command($uname,$gecos,$dir,$shell,$group,$groups,$host_file);
+}
+
+sub gen_passwd() 
+{
+	return join("",("a".."k","m".."z")[rand 25, rand 25, rand 25],("0".."9")[rand 10, rand 10, rand 10]);
+}
+
+sub main::cryptPWD($) {
+	my ($pw)= @_;
+	my $pwd=crypt($pw,join("", (".", "/", 0..9, "A".."Z", "a".."z")[rand 64,rand 64]));
+	return $pwd;
+}
+
+sub add_usrpwd_command($$$$)
+{
+    my ($uname,$opt,$pwd,$host_file)=@_;
+    my $cmd;
+    if($opt eq "r") {
+        $cmd="$USRMGR -p $uname ".$pwd;
+        #TODO $cmd="$USRMGR -p -C $uname ".cryptPWD($pwd);
+    } else {
+        $cmd="$USRMGR -l $uname";
+	}
+    push(@cmd_list,
+        {
+        HOSTS_FILE =>$host_file,
+        COMMAND=>$cmd,
+        RESULT=>0,}
+        );
+
+}
+
+sub get_usrpwd_opts()
+{
+	my ($uname,$opt,$pwd,$host_file);
+	if($#ARGV<0) {
+		while(!defined $uname) {
+			print "What is the uname of the user(required)? ";
+			$uname=get_input();
+		}
+		while(1) {
+			print "Do you want to:\n\tr)eset this users password\n\tl)ock this user\n";
+			$opt = get_input();
+			if($opt eq "r") {
+				last;
+			}
+			if($opt eq "l") {
+				last;
+			}
+		}
+		if($opt eq "r") {
+			if(!defined $pwd) {
+				$pwd=gen_passwd();
+			}
+			print "What is the password[$pwd](optional)? ";
+			my $pw=get_input();
+			if(defined $pw) {
+				$pwd=$pw;
+			}
+		}
+		$host_file=get_host_list();
+	} else {
+		if(!getopts('hyTU:lrp:f:H:',\%opts) || $#ARGV>=0) {
+			exit_code("ERROR: Invalid argument or option, try $progname -h\n",1);
+		}
+		if(defined $opts{"h"}) { # Print Help
+			print "$progname:\n";
+			print "Description:\n";
+			print "\tReset or lock a user to a given list of nodes\n";
+			print "Options:\n";
+			print "\tMenu Mode - No options\n";
+			print "\t-h\t\t\t- This page\n";
+			print "\t-V\t\t\t- Get Version and exit\n";
+			print "\t-T\t\t\t- Run in test mode\n";
+			print "\t-U <uname>\t\t- Uname of the user\n";
+			print "\t-l\t\t\t- Lock the user\n";
+			print "\t-r\t\t\t- Reset the users password\n";
+			print "\t\t\t\t  Switch -l or -r required\n";
+			print "\t-y\t\t\t- don't confirm options\n";
+			print "\t-p <password>\n";
+			print "\t-f <file>|ALL\t\t- File containing list of hosts\n";
+			print "\t-H <hostlist>|ALL\t- Comma delimited  list of hosts\n";
+			print "\t\t\t\t  ALL = all hosts\n";
+			print "\t\t\t\t  Switch -f or -H required\n";
+			print "\n";
+			exit 1;
+		} 
+		if(defined $opts{"U"}) {
+			$uname=$opts{"U"};
+		} else {
+			exit_code("ERROR: -U <uname> is required\n",1);
+		}
+		if(defined $opts{"l"}) {
+			$opt="l";
+		} 
+		if(defined $opts{"r"}) {
+			$opt="r";
+		} 
+		if(defined $opts{"p"}) {
+			$pwd=$opts{"p"};
+		} 
+		if(!defined $pwd) {
+			$pwd=gen_passwd();
+		}
+		if(!defined $opts{"r"} && !defined $opts{"l"}) {
+			exit_code("ERROR: Must specify -r or -l\n",1);
+		}
+		if(defined $opts{"f"} || defined $opts{"H"}) {
+			if(defined $opts{"f"}) {
+				$host_file=$opts{"f"};
+			} elsif(defined $opts{"H"}) {
+				$host_file=$opts{"H"};
+			}
+			if(!validate_host_list($host_file)) {
+				exit_code("ERROR: Invalid Host File or Host List\n",1); 
+			}
+		} else {
+			exit_code("ERROR: -f <host_file> or -H <hostlist> is required\n",1);
+		}
+	}
+	while(!defined $opts{"y"}) {
+		my $input;
+		print "Password Change:\n";
+		print "\tuname: \"$uname\"\n";
+		print "\ttask: \"".(($opt eq "r")?"reset":"lock")."\"\n" if (defined $opt);
+		print "\tpassword: \"$pwd\"\n" if (defined $pwd);
+		print "\thost list: \"$host_file\"\n" if (defined $host_file);
+		print "\t***TESTMODE***\n" if ($TESTMODE);
+		print "Please verify (y/n)?";
+		$input = get_input();
+		last if(defined $input && $input eq "y");
+		exit 0 if(defined $input && $input eq "n");
+	}
+	add_usrpwd_command($uname,$opt,$pwd,$host_file);
+}
+
+sub add_grpadd_command($$$)
+{
+    my ($gname,$gid,$host_file)=@_;
+    my $cmd=$GRPMGR." -a -g $gid $gname";
+    push(@cmd_list,
+        {
+        HOSTS_FILE =>$host_file,
+        COMMAND=>$cmd,
+        RESULT=>0,}
+        );
+}
+
+sub save_new_gid($)
+{
+    my ($data)=@_;
+    my $nextgid=$data->{NEW}+1;
+    open OUTPUT,">$LOG_PREFIX/dsgid3.log" or die "ERROR***** Can't open $LOG_PREFIX/dsgid3.log. Contact AIS:$!\n";   # Add to new allocated
+    print OUTPUT "nextgid:$nextgid\n";
+    close OUTPUT;
+    copy("$LOG_PREFIX/dsgid3.log","$LOG_PREFIX/dsgid2.log");
+    unlink("$LOG_PREFIX/dsgid3.log");
+    open OUTPUT,">>$LOG_PREFIX/dsnewgid.log" or die "ERROR***** Can't open $LOG_PREFIX/dsnewgid.log. Contact AIS:$!\n";   # Add to new allocate
+    print OUTPUT $data->{GNAME}." ".$data->{GID}." <HOST>\n";   # Add to new allocated file
+    close OUTPUT;
+    close($GID_LOCK);
+}
+
+
+sub generate_gid($)
+{
+    my ($gname)=@_;
+    my $gid;
+    my %gids;
+	my $data;
+
+	if ( ! -f "$LOG_PREFIX/dsgid.log" ) {             ### check for gid file
+	   exit_code ("ERROR**** $LOG_PREFIX/dsgid.log not found.  Contact AIS :$! \n",1);
+	}
+	if ( ! -f "$LOG_PREFIX/dsgid2.log" ) {             ### check for nextgid file
+	   exit_code("ERROR**** $LOG_PREFIX/dsgid2.log not found.  Contact AIS :$! \n",1);
+	}
+
+    #Lock the file so no one else can make changes
+    open $GID_LOCK,">",$GID_LOCK_FILE or die "ERROR: Could open lock $GID_LOCK_FILE: $!\
+n";
+	$GID_LOCK->autoflush(1);
+    flock($GID_LOCK,LOCK_EX);
+	print $GID_LOCK "$0 $$\n";
+
+    my $found=0;
+    open INPUT,"<","$LOG_PREFIX/dsgid.log" or die "ERROR***** Can't open $LOG_PREFIX/dsgid.log.  Contact AIS:$!\n";
+    while(my $line=<INPUT>) {
+        if($line =~/^$gname /) {
+            $found=1;
+            chomp $line;
+            my ($name, $id) = split(/ /,$line);
+            if ($name eq $gname) {
+                $gids{$id}++;
+            }
+        }
+    }
+
+	if (!$found && -f "$LOG_PREFIX/dsnewgid.log" ) {       ### check for newgid file
+		open INPUT,"$LOG_PREFIX/dsnewgid.log" or die "ERROR***** Can't open $LOG_PREFIX/dsnewgid.log. Contact AIS:$!\n";
+		while(my $line=<INPUT>) {
+			if($line=~/^$gname /) {
+				$found=1;
+				chomp($line);
+				my ($name, $id) = split(/ /,$line);
+                $gids{$id}++;
+			}
+		}
+		close INPUT;
+	}
+
+    if(!$found) {
+        open INPUT,"<$LOG_PREFIX/dsgid2.log" or die "ERROR***** Can't open $LOG_PREFIX/dsgid2.log. Contact AIS:$!\n";   # Open dsgid2
+        my $line=<INPUT>;
+        chomp($line);
+        close INPUT;
+        my ($text,$nextgid)=split(":",$line);
+        $gid=$nextgid;
+    }
+
+	if(!defined $gid) {
+		foreach my $id (keys(%gids)) {
+			if(!defined $gid || $gids{$id}>$gids{$gid}) { # Find the first gid with the most hits
+				$gid=$id;
+			}
+		}
+		$data={GNAME=>$gname,GID=>$gid,NEW=>0};
+		close($GID_LOCK); #release the lock
+	} else {
+		$data={GNAME=>$gname,GID=>$gid,NEW=>$gid};
+	}
+    return $data;
+}
+
+
+sub get_grpadd_opts()
+{
+	my ($gname,$gid,$host_file);
+	my $data;
+	if($#ARGV<0) {
+		while(!defined $gname) {
+			print "What is the gname of the group(required)? ";
+			$gname=get_input();
+			$gname =~ s/\s+//g; #strip white space
+		}
+		$data = generate_gid($gname);
+		if(!defined $data) {
+			exit_code("ERROR: Unable to generate GID for $gname!!\n",1);
+		}
+		$gid=$data->{GID};
+		
+		$host_file = get_host_list();
+	} else {
+		if(!getopts('hyTG:f:H:',\%opts) || $#ARGV>=0) {
+			exit_code("ERROR: Invalid argument or option, try $progname -h\n",1);
+	}
+		if(defined $opts{"h"}) { # Print Help
+			print "$progname:\n";
+			print "Description:\n";
+			print "\tAdd a group info on a given list of nodes\n";
+			print "Options:\n";
+			print "\tMenu Mode - No options\n";
+			print "\t-h\t\t\t- This page\n";
+			print "\t-V\t\t\t- Get Version and exit\n";
+			print "\t-T\t\t\t- Run in test mode\n";
+			print "\t-G <gname>\t\t- Name of the group(required)\n";
+			#print "\t-g <gid>\t\t- Gid of the group(optional)\n";
+			print "\t-f <file>|ALL\t\t- File containing list of hosts\n";
+			print "\t-H <hostlist>|ALL\t- Comma delimited  list of hosts\n";
+			print "\t\t\t\t  ALL = all hosts\n";
+			print "\t\t\t\t  Switch -f or -H required\n";
+			print "\t-y\t\t\t- don't confirm options\n";
+			print "\n";
+			exit 1;
+		} 
+		if(defined $opts{"G"}) {
+			$gname=$opts{"G"};
+		} else {
+			exit_code("ERROR: -G <gname> is required\n",1);
+		}
+		if(defined $opts{"g"}) {
+			$gid=$opts{"g"};
+		} 
+		$gname =~ s/\s+//g; #strip white space
+		$data=generate_gid($gname);
+		if(!defined $data) {
+			exit_code("ERROR: Unable to generate GID for $gname!!\n",1); 
+		}
+		$gid=$data->{GID};
+		if(defined $opts{"f"} || defined $opts{"H"}) {
+			if(defined $opts{"f"}) {
+				$host_file=$opts{"f"};
+			} elsif(defined $opts{"H"}) {
+				$host_file=$opts{"H"};
+			}
+			if(!validate_host_list($host_file)) {
+				exit_code("ERROR: Invalid Host File or Host List\n",1);
+			}
+		} else {
+			exit_code("ERROR: -f <host_file> or -H <hostlist> is required\n",1);
+		}
+	}
+	while(!defined $opts{"y"}) {
+		my $input;
+		print "Group add:\n";
+		print "\tgname: \"$gname\"\n";
+		print "\tgid: \"$gid\"\n" if (defined $gid);
+		print "\thost list: \"$host_file\"\n" if (defined $host_file);
+		print "\t***TESTMODE***\n" if ($TESTMODE);
+		print "Please verify (y/n)?";
+		$input = get_input();
+		last if(defined $input && $input eq "y");
+		exit 0 if(defined $input && $input eq "n");
+	}
+    add_grpadd_command($gname,$gid,$host_file);
+	if($data->{NEW}!=0) {
+		save_new_gid($data);
+	}
+}
+
+sub add_grpmod_command($$$$)
+{
+    my ($gname,$uname,$opt,$host_file)=@_;
+    my $cmd=$GRPMGR;
+    if($opt eq "r") {
+		$cmd.=" -U";
+	}
+	if($opt eq "a") {
+		$cmd.=" -u";
+	}
+    $cmd.=" $uname $gname";
+    push(@cmd_list,
+        {
+        HOSTS_FILE =>$host_file,
+        COMMAND=>$cmd,
+        RESULT=>0,}
+        );
+}
+
+sub get_grpmod_opts()
+{
+	my ($uname,$gname,$opt,$host_file);
+	if($#ARGV<0) {
+		while(!defined $gname) {
+			print "What is the gname of the group(required)? ";
+			$gname=get_input();
+		}
+		while(!defined $uname) {
+			print "What is the uname of the user(required)? ";
+			$uname=get_input();
+		}
+		while(1) {
+			print "What do you want to do?\n\ta)dd user to group \n\tr)emove user from group\n ";
+			$opt = get_input();
+			if($opt eq "a") {
+				last;
+			}
+			if($opt eq "r") {
+				last;
+			}
+		}
+		$host_file = get_host_list();
+	} else {
+		if(!getopts('hyTarG:U:f:H:',\%opts) || $#ARGV>=0) {
+			exit_code("ERROR: Invalid argument or option, try $progname -h\n",1);
+		}
+		if(defined $opts{"h"}) { # Print Help
+			print "$progname:\n";
+			print "Description:\n";
+			print "\tModify groups member ship on a given list of nodes\n";
+			print "Options:\n";
+			print "\tMenu Mode - No options\n";
+			print "\t-h\t\t\t- This page\n";
+			print "\t-V\t\t\t- Get Version and exit\n";
+			print "\t-T\t\t\t- Run in test mode\n";
+			print "\t-G <gname>\t\t- Name of the group(required)\n";
+			print "\t-U <uname>\t\t- Uname of the user\n";
+			print "\t-a\t\t\t- Add this user to group\n";
+			print "\t-r\t\t\t- Remove this user from group\n";
+			print "\t-f <file>|ALL\t\t- File containing list of hosts\n";
+			print "\t-H <hostlist>|ALL\t- Comma delimited  list of hosts\n";
+			print "\t\t\t\t  ALL = all hosts\n";
+			print "\t\t\t\t  Switch -f or -H required\n";
+			print "\t-y\t\t\t- don't confirm options\n";
+			print "\n";
+			exit 1;
+		}
+		if(defined $opts{"U"}) {
+			$uname=$opts{"U"};
+		} else {
+			exit_code("ERROR: -U <uname> is required\n",1);
+		}
+		if(defined $opts{"G"}) {
+			$gname=$opts{"G"};
+		} else {
+			exit_code("ERROR: -G <gname> is required\n",1);
+		}
+		if(!defined $opts{"r"} && !defined $opts{"a"}) {
+			exit_code("ERROR: -a or -r is required\n",1);
+		} elsif(defined $opts{"r"} && defined $opts{"a"}) {
+			exit_code("ERROR: Can't use both options -a and -r\n",1);
+		}
+		if(defined $opts{"r"}) {
+			$opt="r";
+		}
+		if(defined $opts{"a"}) {
+			$opt="a";
+		}
+		if(defined $opts{"f"} || defined $opts{"H"}) {
+			if(defined $opts{"f"}) {
+				$host_file=$opts{"f"};
+			} elsif(defined $opts{"H"}) {
+				$host_file=$opts{"H"};
+			}
+			if(!validate_host_list($host_file)) {
+				exit_code("ERROR: Invalid Host File or Host List\n",1); 
+			}
+		} else {
+			exit_code("ERROR: -f <host_file> or -H <hostlist> is required\n",1); 
+		}
+	}
+	while(!defined $opts{"y"}) {
+		my $input;
+		print "Group add:\n";
+		print "\tgname: \"$gname\"\n";
+		print "\tuname: \"$uname\"\n" if (defined $uname);
+		print "\ttask: \"".(($opt eq "r")?"remove":"add")."\"\n" if (defined $opt);
+		print "\thost list: \"$host_file\"\n" if (defined $host_file);
+		print "\t***TESTMODE***\n" if ($TESTMODE);
+		print "Please verify (y/n)?";
+		$input = get_input();
+		last if(defined $input && $input eq "y");
+		exit 0 if(defined $input && $input eq "n");
+	}
+    add_grpmod_command($gname,$uname,$opt,$host_file);
+}
+
+
+#####
+#
+#MAIN
+#
+#####
+#Check for user in secuirty group
+my ($sgroup, $spwd, $sgid, $members)=getgrnam("security");
+chomp($members);
+foreach (split(" ",$members)) {
+    if($REAL_USER eq $_) {
+        $SECURITY =1;
+    }
+}
+#check for security is users primary group
+($junk,$junk,$junk,my $gid,$junk,$junk,$junk,$junk,$junk,$junk)= getpwnam($REAL_USER);
+if($sgid == $gid) {
+    $SECURITY =1;
+}
+
+
+print "$progname Version 1.5.0\n";
+for(my $i=0;$i<=$#ARGV;$i++)  {
+	if ($ARGV[$i] eq "-T") {
+		$TESTMODE=1;
+		delete $ARGV[$i];
+		next;
+	} elsif ($ARGV[$i] eq "-V") {
+		exit 0;
+	}
+}
+
+if ($progname eq "usrmgt") {
+	get_usrmgt_opts();
+} elsif ($progname eq "usradd") {
+	get_usradd_opts();
+} elsif ($progname eq "usrmod") {
+	get_usrmod_opts();
+} elsif ($progname eq "usrpwd") {
+	get_usrpwd_opts();
+} elsif ($progname eq "grpadd") {
+	get_grpadd_opts();
+} elsif ($progname eq "grpmod") {
+	get_grpmod_opts();
+}
+#print "TODO REMOVE ME EXITING\n";
+#exit;
+
+if (-f $BLACKLIST) {
+	open BLACKLIST,"<".$BLACKLIST or exit_code("Can't open $BLACKLIST : $!\n",1);
+	while(my $line=<BLACKLIST>) {
+		chomp($line);
+		my($host,$last)=split(/#/,$line);
+		if(defined $host) {
+			$host =~ s/\s+//g; #strip white space
+			if(length($host)) {
+				$blacklist{$host}=$line;
+			}
+		}
+
+	}
+	close BLACKLIST;
+}
+
+my $batch_start_time=time();
+my $batch_cmd_error=0;
+my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime($batch_start_time);
+my $date=sprintf "%4d%02d%02d.%02d%02d%02d", $year+1900,$mon+1,$mday,$hour,$min,$sec;
+my $detail_log=">".$progname.".detail.$date.log";
+my $summary_log=">".$progname.".summary.$date.log";
+my $master_log=">>$LOG_PREFIX/usrmgt.master.$date.log";
+
+$SIG{"INT"} = "IGNORE"; #Ignore interupts -like ctrl-c
+#open the log file
+open DETAIL,$detail_log or exit_code("Can't open $detail_log : $!\n",1);
+$detail_opened=1;
+open SUMMARY,$summary_log or exit_code("Can't open $summary_log : $!\n",1);
+$summary_opened=1;
+open MASTER,$master_log or exit_code("Can't open $master_log : $!\n",1);
+close MASTER;
+
+#Run the command(s)
+foreach my $cmd (@cmd_list) {
+	my $cmd_start_time=time();
+	if ($#cmd_list) { 
+		print_message("***** New Command *****\n",1,1,1);
+	}
+	if($cmd->{RESULT}=run_job($cmd->{HOSTS_FILE},$cmd->{COMMAND})) {
+		print_message("!!!!! Attention !!!!!\n",1,1,1);
+		print_message("Previous command had $cmd->{RESULT} errors!\n",1,1,1);
+		print_message("Please check the summary and detail logs for more information.\n",1,1,1);
+		$batch_cmd_error++;
+	} else {
+		print_message("\nCommand complete with no errors detected.\n",1,1,1);
+	}
+	print_message("Command run time: ".(time()-$cmd_start_time)." seconds \n\n",1,1,1);
+	open MASTER,$master_log or exit_code("Can't open $master_log : $!\n",1);
+	print MASTER "$cmd_start_time:$REAL_USER:".File::Spec->rel2abs($progname).":$cmd->{COMMAND}:$cmd->{HOSTS_FILE}:$cmd->{RESULT}:".(time()-$cmd_start_time)."\n";
+    close MASTER;
+}
+
+if($#cmd_list>1) {
+	if($batch_cmd_error>0) {
+		print_message("!!!!! Attention !!!!!\n",1,1,1);
+		print_message("Batch had $batch_cmd_error errors!\n",1,1,1);
+	} else {
+		print_message("\nBatch complete with no errors detected.\n",1,1,1);
+	}
+	print_message("\nBatch run time: ".(time()-$batch_start_time)." seconds \n",1,1,1);
+}
+
+print_message("DETAIL LOG\n\t\"".(substr $detail_log,1)."\"\n",1,1,0);
+print_message("SUMMARY LOG\n\t\"".(substr $summary_log,1)."\"\n",1,0,1);
+
+#Close the log
+close DETAIL;
+close SUMMARY;

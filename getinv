@@ -1,0 +1,523 @@
+#!/bin/bash
+#
+#TODO
+#mysql
+#apache conf
+#samba
+#netstat -p
+#iptables
+#selinux audit 
+#sshd_config?
+#
+
+
+INV_DIR="/var/lib/inventory"
+KEY_FILE="/root/.ssh/id_getinv"
+KEY_USER="getinv"
+INV_HOST="lxinv"
+status=0
+
+export PATH="/sbin:/usr/sbin:/bin:/usr/bin"
+LOCAL=0
+while (( "$#" )); do
+	if [ -z "${script}" -a "${1}" = "-l" ]; then
+		LOCAL=1
+	fi
+	shift
+done
+
+found=0
+if [ -e "/etc/redhat-release" ]; then
+	VGDISPLAY="/usr/sbin/vgdisplay"
+	PVDISPLAY="/usr/sbin/pvdisplay"
+	LVDISPLAY="/usr/sbin/lvdisplay"
+	NTPQ="/usr/sbin/ntpq"
+	LSPIC="/sbin/lspci"
+	LSHW="/usr/sbin/lshw"
+	ETHTOOL="/sbin/ethtool"
+	GRUB_CFG="/boot/grub/menu.lst"
+	found=1
+elif [ -e "/etc/SuSE-release" ]; then
+	VGDISPLAY="/sbin/vgdisplay"
+	PVDISPLAY="/sbin/pvdisplay"
+	LVDISPLAY="/sbin/lvdisplay"
+	NTPQ="/usr/sbin/ntpq"
+	LSHW="/usr/sbin/lshw"
+	LSPIC="/sbin/lspci"
+	ETHTOOL="/usr/sbin/ethtool"
+	GRUB_CFG="/boot/grub/menu.lst"
+	found=1
+elif [ -e "/etc/debian_version" ]; then
+	VGDISPLAY="/sbin/vgdisplay"
+	PVDISPLAY="/sbin/pvdisplay"
+	LVDISPLAY="/sbin/lvdisplay"
+	NTPQ="/usr/bin/ntpq"
+	LSHW="/usr/bin/lshw"
+	LSPIC="/usr/bin/lspci"
+	ETHTOOL="/usr/sbin/ethtool"
+	GRUB_CFG="/boot/grub/grub.cfg"
+	found=1
+elif [ $found -ne 1 ]; then
+	echo "Unknown Distro!!" > $INV_DIR/distro
+	echo "Unknown Distro!!"
+	echo "FAILURE!! #${LINENO}!!"
+	status=1
+fi
+
+echo "Deleting old $INV_DIR"
+/bin/rm -rf $INV_DIR/*
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Creating $INV_DIR"
+/bin/mkdir -m 700 -p ${INV_DIR}
+/usr/bin/uptime >$INV_DIR/uptime
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+/usr/bin/md5sum $0 > $INV_DIR/getinv_version
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting uname -a"
+/bin/uname -a >$INV_DIR/uname
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting uname -i"
+/bin/uname -m >$INV_DIR/uname.arch
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting uname -r"
+/bin/uname -r >$INV_DIR/uname.release
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting uname -v"
+/bin/uname -v >$INV_DIR/uname.version
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting ulimit files" 
+/bin/cp -a /etc/security/limits.* $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting hostid"
+hostid >$INV_DIR/hostid
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+if [ -e "/var/lib/bcfg2/bcfg2" ]; then
+	/bin/cp /var/lib/bcfg2/bcfg2 $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Getting Linux Distro"
+if [ -e "/etc/redhat-release" ]; then
+	echo "RedHat" > $INV_DIR/distro
+	/bin/cp /etc/redhat-release $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting installed packages"
+	/bin/rpm -q -a > $INV_DIR/rpm
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting configured services"
+	/sbin/chkconfig --list > $INV_DIR/services
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	ls /etc/sysconfig/network-scripts/route-*  >/dev/null 2>&1
+	if [ $? -eq 0 ];  then
+		echo "Getting configured routes"
+		/bin/cp /etc/sysconfig/network-scripts/route-* $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+
+	echo "Getting configured interfaces"
+	/bin/cp /etc/sysconfig/network-scripts/ifcfg-* $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting configured network"
+	/bin/cp /etc/sysconfig/network $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	if [ -e /etc/modprobe.conf ]; then
+		echo "Getting modprobe.conf"
+		/bin/cp -a /etc/modprobe.conf $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+
+	if [ -e /etc/yum.conf ]; then
+		echo "Getting yum.conf"
+		/bin/cp -a /etc/yum.conf $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+
+	if [ -e /etc/yum ]; then 
+		echo "Getting yum config"
+		/bin/cp -a /etc/yum $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+
+	if [ -e /etc/yum.repos.d ]; then 
+		echo "Getting yum repos"
+		/bin/cp -a /etc/yum.repos.d $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+
+	if [ -e /etc/sysconfig/rhn ]; then 
+		echo "Getting rhn config"
+		/bin/cp -a /etc/sysconfig/rhn $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+
+	echo "Getting install date"
+	#get the earliest package installed and calc the jdate
+
+	P=`/bin/rpm -qa --last | tail -1`
+	D=`/bin/bash -c "echo \\\$@" $P `
+	date +%s -d "$D" > $INV_DIR/install_date
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting /etc/inittab"
+	/bin/cp -a /etc/inittab $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e "/etc/SuSE-release" ]; then
+	echo "SuSE" > $INV_DIR/distro
+	/bin/cp /etc/SuSE-release $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting installed packages"
+	/bin/rpm -q -a > $INV_DIR/rpm
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting configured services"
+	/sbin/chkconfig --list > $INV_DIR/services
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	if [ -e /etc/yum.conf ]; then
+		echo "Getting yum.conf"
+		/bin/cp -a /etc/yum.conf $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+
+	if [ -e /etc/yum ]; then
+		echo "Getting yum config"
+		/bin/cp -a /etc/yum $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+
+	echo "Getting install date"
+	#get the earliest package installed and calc the jdate
+	P=`/bin/rpm -qa --last | tail -1`
+	D=`/bin/bash -c "echo \\\$@" $P `
+	date +%s -d "$D" > $INV_DIR/install_date
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting /etc/inittab"
+	/bin/cp -a /etc/inittab $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi 
+
+if [ -e "/etc/debian_version" ]; then
+	if [ -e /etc/lsb-release ]; then
+		echo "Ubuntu" > $INV_DIR/distro
+		/bin/cp /etc/lsb-release $INV_DIR
+		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+		
+	else
+		echo "debian" > $INV_DIR/distro
+	fi
+	/bin/cp /etc/debian_version $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	echo "Getting installed packages"
+	/usr/bin/dpkg --get-selections > $INV_DIR/rpm
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	echo "Getting configured interfaces"
+	/bin/cp /etc/network/interfaces $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	echo "Getting configured hostname"
+	/bin/cp /etc/hostname $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	echo "Getting modprobe.d"
+	/bin/cp -a /etc/modprobe.d $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting install date"
+	stat -c %Z `ls /var/lib/dpkg/info/*.list -t | tail -1` > $INV_DIR/install_date
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+	echo "Getting /etc/event.d"
+	/bin/cp -a /etc/event.d $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Getting lsmod"
+/sbin/lsmod > $INV_DIR/lsmod
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting resolv.conf"
+/bin/cp -a /etc/resolv.conf $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+if [ -e /etc/postfix ]; then
+	echo "Getting postfix config"
+	/bin/cp -a /etc/postfix $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e /etc/mail ]; then
+	echo "Getting mail config"
+	/bin/cp -a /etc/mail $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e /etc/ssmtp ]; then
+	echo "Getting ssmtp config"
+	/bin/cp -a /etc/ssmtp $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e /etc/nagios ]; then
+	echo "Getting nagios config"
+	/bin/cp -a /etc/nagios $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e /etc/ldap.conf ]; then
+	echo "Getting ldap config"
+	/bin/cp -a /etc/ldap.conf $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Getting nsswitch config"
+/bin/cp -a /etc/nsswitch.conf $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting pam config"
+/bin/cp -a /etc/pam.d $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+if [  -e ${GRUB_CFG} ]; then 
+	echo "Getting configured menu.lst"
+	/bin/cp ${GRUB_CFG} $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Getting passwd"
+/bin/cp /etc/passwd $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+echo "Getting group"
+/bin/cp /etc/group $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting cron"
+/bin/cp -ar /var/spool/cron $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting backup info"
+if [ -e "/usr/sbin/nsrinfo" ]; then
+        /usr/sbin/nsrinfo -s chd-sv-backup01 `hostname | cut -d \. -f 1`| gzip   >$INV_DIR/backup.gz
+        if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Getting ntp status"
+${NTPQ} -p >$INV_DIR/ntp
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+echo "Getting ntp.conf"
+/bin/cp /etc/ntp.conf $INV_DIR/ntp.conf
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+if [ -e "/etc/sysconfig/ntpd" ]; then
+        echo "Getting system/ntpd"
+        /bin/cp /etc/sysconfig/ntpd $INV_DIR
+        if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -f /usr/sbin/ptpd ]; then 
+	echo "Getting ptp status"
+	/usr/sbin/ptpd -k 0 -b lo >$INV_DIR/ptp
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	if [ -e "/etc/sysconfig/ptpd" ]; then
+        echo "Getting system/ptpd"
+        /bin/cp /etc/sysconfig/ptpd $INV_DIR
+        if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+fi
+
+if [ -f /var/lib/ptp/ptp_check ]; then 
+	/bin/cp /var/lib/ptp/ptp_check $INV_DIR
+fi
+
+echo "Getting configured network cards"
+#/sbin/ifconfig -a > $INV_DIR/ifconfig
+/sbin/ip addr show > $INV_DIR/ip_addr
+
+echo "Getting configured routes"
+/bin/netstat -rn > $INV_DIR/routes
+/sbin/ip route show > $INV_DIR/ip_route
+
+echo "Getting lshw.xml"
+${LSHW} -xml > $INV_DIR/lshw.xml
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting lshw"
+${LSHW} -short > $INV_DIR/lshw
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+#TODO parted /dev/sda print from lshw
+
+echo "Getting fstab"
+/bin/cp /etc/fstab $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+/bin/mount >$INV_DIR/mount
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting autofs"
+/bin/cp -a /etc/auto.* $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting df"
+/bin/df -TPa > $INV_DIR/df
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+if [ -e ${VGDISPLAY} ]; then
+        echo "Getting vgdisplay"
+        ${VGDISPLAY} -c > $INV_DIR/vgdisplay
+        if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+        echo "Getting lvdisplay"
+        ${LVDISPLAY} -c > $INV_DIR/lvdisplay
+        if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+        echo "Getting pvdisplay"
+        ${PVDISPLAY} -c > $INV_DIR/pvdisplay
+        if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Getting run level"
+/usr/bin/who -a | grep run > $INV_DIR/runlevel
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+if [ -e "/usr/sbin/exportfs" ]; then
+        echo "Getting exportfs"
+        /usr/sbin/exportfs -v > $INV_DIR/exportfs
+        if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e /etc/exports ]; then
+        echo "Getting exports"
+        /bin/cp /etc/exports $INV_DIR
+        if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Getting last 10 logins"
+/usr/bin/last -10 > $INV_DIR/last
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+echo "Getting /etc/security"
+/bin/cp -a /etc/security $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+if [ -e /usr/bin/facter ]; then
+	echo "Getting facter"
+	/usr/bin/facter > $INV_DIR/facter
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Getting lspci"
+$LSPCI > $INV_DIR/lspci
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+if [[ "`/usr/sbin/dmidecode -s system-manufacturer`" = "HP" ||  "`/usr/sbin/dmidecode -s system-manufacturer`" = "Hewlett-Packard" ]]; then
+	PROD=`/usr/sbin/dmidecode -s system-product-name`
+	if [[ $PROD = ProLiant* ]]; then
+		if [[ -e /opt/hp/conrep/conrep && -e /usr/sbin/dmidecode ]]; then
+			echo "Getting conrep"
+			/opt/hp/conrep/conrep -s -x/opt/hp/conrep/conrep.xml -s -f$INV_DIR/conrep.dat 
+			if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+		fi
+		echo "Getting ilo data"
+		/sbin/hponcfg -a -w /var/lib/inventory/ilo.xml
+		/sbin/hponcfg -w /var/lib/inventory/ilo-net.xml
+#SJP		if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+	fi
+fi 
+
+if [ -e /usr/sbin/dmidecode ]; then
+	echo "Getting dmidecode"
+	/usr/sbin/dmidecode > $INV_DIR/dmidecode
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e /usr/sbin/biosdecode ]; then
+	echo "Getting biosdecode"
+	/usr/sbin/biosdecode > $INV_DIR/biosdecode
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e /proc/cpuinfo ]; then
+	echo "Getting cpuinfo"
+	/bin/cp /proc/cpuinfo $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+if [ -e /proc/meminfo ]; then
+	echo "Getting meminfo"
+	/bin/cp /proc/meminfo $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+
+CDPR=0;
+HAVE_ETHTOOL=0;
+if [ -e /usr/sbin/ladvdc -a "`/usr/sbin/dmidecode -s system-manufacturer`" != "VMware, Inc." ]; then  
+	echo "Getting ladvdc"
+    /usr/sbin/ladvdc > $INV_DIR/ladvdc
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+#if [ -e /usr/bin/cdpr -a "`/usr/sbin/dmidecode -s system-manufacturer`" != "VMware, Inc." ]; then  CDPR=1; fi
+echo "Getting nic info..."
+if [ -e ${ETHTOOL} ]; then HAVE_ETHTOOL=1;fi 
+for I in `grep network $INV_DIR/lshw | grep -v ib | grep -v bond | awk '{print $2}' | grep -v network`
+do 
+	if [[ ! ${I} =~ "\." ]]; then
+		if [ ${HAVE_ETHTOOL} -eq 1 ]; then
+			echo -e "\tethtool for $I"
+			${ETHTOOL} $I > $INV_DIR/$I.ethtool
+			if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+			${ETHTOOL} -i $I >> $INV_DIR/$I.ethtool
+			if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+			#${ETHTOOL} -k $I >> $INV_DIR/$I.ethtool
+		fi
+#		if [ $CDPR -eq 1 -a  `/bin/grep Link $INV_DIR/$I.ethtool | cut -f 2 -d ":"` == "yes" ]; then
+#			echo -e "\tand cdpr"
+#			/usr/bin/cdpr -d $I -t 120 > $INV_DIR/$I.cdpr
+#			#if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+#		fi
+	fi
+done
+
+if [ -r /etc/builddb.env ]; then
+	/bin/cp /etc/builddb.env $INV_DIR
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+echo "Kernel config"
+/bin/cp /etc/sysctl.conf $INV_DIR
+if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+
+/bin/rm -f $INV_DIR/collected
+echo $status > $INV_DIR/collected
+
+if [ ${LOCAL} -eq 0 ]; then 
+	#If not local
+	# Ftp/ssh data to servers
+	# local or rsync /var/data/Inventory/<hosts> inv@inv-host:/var/data/Inventory/<host>
+	echo "Sending File..."
+	#rsync -avzr --delete -e "ssh -o StrictHostKeyChecking=no -o BatchMode=yes -T -i $KEY_FILE" $INV_DIR/* $KEY_USER@$INV_HOST:data/`hostname | cut -d \. -f 1`
+
+	if [ -e /usr/bin/rsync ]; then
+		RSYNC=/usr/bin/rsync
+	else
+		RSYNC=/root/bin/rsync
+	fi
+	${RSYNC} -av --delete /var/lib/inventory/ rsync://root@${INV_HOST}.chicagotrading.com/Inventory/`hostname | cut -d \. -f 1`
+	if [ $? -ne 0 ]; then status=1; echo "FAILURE!! #${LINENO}!!"; fi
+fi
+
+exit $status;
+

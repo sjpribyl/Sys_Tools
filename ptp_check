@@ -1,0 +1,97 @@
+#!/usr/bin/perl 
+#printf "YOU ARE HERE:". __LINE__."\n";
+#print Data::Dumper->Dump([%offset], [qw(%offset)]);
+use strict;
+use warnings;
+use Getopt::Std;
+use LWP::Simple;
+
+use Cwd 'abs_path';
+use File::Basename;
+use lib dirname(abs_path($0)).'/modules';
+use POSIX qw(strftime);
+use Data::Dumper;
+
+if ( !(-d "/var/lib/ptp")) {
+	mkdir "/var/lib/ptp" or die "Can't create /var/lib/ptp : $!";
+}
+our $basedir="/var/www/Inventory";
+our $datadir="$basedir/.reports";
+my $report="/var/lib/ptp/ptp_check";
+getstore("http://lxinv/.reports/host_db.txt","/var/lib/ptp/host_db.txt");
+my $host_db=require "/var/lib/ptp/host_db.txt";
+my $success=1;
+$|=1;
+
+sub print_output($) {
+    my $line=$_[0];
+    print OUTPUT $line;
+    print $line;
+}
+
+unlink ($report);
+open(OUTPUT,">", $report) or die("Unable to open $report : $!\n");
+
+my %mac_index;
+foreach my $key (sort (keys %{$host_db})) {
+	next if ( $key =~ "_"); #Skip Special records
+	foreach my $nic (keys %{$host_db->{$key}->{INTERFACES}}) {
+		next if ($nic eq "lo"); # Skip home
+		next if ($nic eq "sit0"); # Skip sit 
+		$mac_index{$host_db->{$key}->{INTERFACES}->{$nic}->{ETHER}}=$key;
+	}
+}
+
+my $hostname;
+my %offset;
+my $maxtime=0;
+my $maxhost="";
+my $mintime=0;
+my $minhost="";
+
+#TODO Get the args from /etc/sysconfig/ptpd
+open INPUT,"/usr/sbin/ptpd -T 3 -k 10|" or die "Can't open ptp command";
+while (<INPUT>) {
+	s/^\s+//g; # no leading white spaces 
+	next unless length;
+	my ($field,$data)=split();
+	if ($field =~ /sourceUuid/) { #sourceUuid 00:50:56:9b:1e:7a
+		$hostname=$mac_index{$data};
+		if (!defined($hostname)) {
+			$hostname="$data-UNKNOWN";
+		}
+		$offset{$hostname}{MAC}=$data;
+	}
+	if ($field =~ /offsetFromMaster/) { #offsetFromMaster 0.000000000
+		$offset{$hostname}{OFFSET}=$data;
+		if ( $data > $maxtime ) {
+			$maxtime=$data;
+			$maxhost=$hostname;
+		}
+		if ( $data < $mintime ) {
+			$mintime=$data;
+			$minhost=$hostname;
+		}
+	}
+}
+
+
+foreach my $host (sort(keys %offset)) {
+	print_output "$host $offset{$host}{MAC} $offset{$host}{OFFSET}\n";
+}
+
+print_output "\n\n";
+print_output "Slowest offset was $mintime from $minhost\n";
+print_output "Fastest offset was $maxtime from $maxhost\n";
+print_output "($maxtime) sec - ($mintime) sec == ".($maxtime-$mintime)." sec\n";
+print_output "Offset delta  == ".(($maxtime-$mintime)*1000000)." microseconds\n";
+
+if (  (($maxtime-$mintime)*1000000) > 5000 ) {
+    $success=0;
+    print_output "ERROR .... \n";
+    print_output "ERROR .... Offset delta is too large.\n";
+    print_output "ERROR .... \n";
+}
+
+exit !$success; #SHELL exit codes are oposite of perl, blarg
+# vim: ts=4  sw=4 autoindent

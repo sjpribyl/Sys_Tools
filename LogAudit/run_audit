@@ -1,0 +1,25 @@
+#!/bin/bash
+
+
+FILE=`mktemp -p /tmp "log_audit_file.XXXXX"`
+MSG_FILE=`mktemp -p /tmp "log_audit_msg.XXXXX"`
+
+echo $0 >>${MSG_FILE}
+date >> ${MSG_FILE}
+echo >> ${MSG_FILE}
+
+STATUS=0;
+for I in `ls /usr/local/bin/scripts/log_audit/*.pl`; do  
+	echo $I >> ${MSG_FILE}
+	$I >>${FILE} 2>>${MSG_FILE}; 
+	ECODE=$?
+	echo -e "\tExit Code:\t${ECODE}" >>${MSG_FILE}; 
+	if [ $ECODE  -ne 0 ];then  STATUS=1; fi
+	echo >>${MSG_FILE}
+done  
+
+(cat ${MSG_FILE}  && (cat ${FILE} | unix2dos | uuencode AuditLogReport.txt)) | mail -s "Audit Log Report" SystemsSupport
+
+rm ${FILE};
+rm ${MSG_FILE};
+exit $STATUS

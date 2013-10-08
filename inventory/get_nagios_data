@@ -1,0 +1,22 @@
+#!/bin/bash
+
+STATUS=0;
+
+for J in uschi12tso03 uschi12bcfg01 nagios nagios-qa nagios-lon
+do
+	/bin/rm -f /var/tmp/$J.lst
+	if [ $? -ne 0 ]; then STATUS=1; fi
+	for I in `ssh $J grep host_name /var/log/nagios/objects.cache | awk '{ print $2 }' | sort -u` 
+	do 
+		nslookup $I
+		if [ $? -ne 0 ]; then STATUS=1; fi
+	done  | grep Name | awk '{ print $2 }' | cut -f 1 -d . | sort -u  > /var/tmp/$J.lst
+	scp /var/tmp/$J.lst lxinv:/var/www/Inventory/.nagios
+	if [ $? -ne 0 ]; then STATUS=1; fi
+	/bin/rm -f /var/tmp/$J.lst
+	if [ $? -ne 0 ]; then STATUS=1; fi
+done 
+
+# vim: set tabstop=4 shiftwidth=4 autoindent:
+exit $STATUS
+# vim: ts=4  sw=4 autoindent
